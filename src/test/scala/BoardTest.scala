@@ -1,5 +1,9 @@
 import org.scalatest.FunSuite
 import core._
+import breeze.linalg._
+import net.liftweb.json
+import net.liftweb.json.JsonAST._
+import net.liftweb.json.Extraction._
 
 class BoardTest extends FunSuite {
   test("board.BoardTransform") {
@@ -23,45 +27,103 @@ class BoardTest extends FunSuite {
 
     val moves = List(0, 19, 50, 40)
     for (move <- moves) {
-      board.move(move)
+      board.make_move(move)
     }
+
   }
   test(testName = "simple win") {
     val board = new Bitboard(size=9, win_chain_length = 5)
     for (move <- List(0, 1, 9, 10, 18, 19, 27, 28)) {
-      board.move(move)
+      board.make_move(move)
+      assert (board.game_state == GameState.NOT_OVER)
     }
-    board.move(36)
+    board.make_move(36)
     board.pprint()
-    assert (board.game_state() == GameState.WIN_PLAYER_1)
+    assert (board.game_state == GameState.WIN_PLAYER_1)
+  }
+  test(testName = "available_moves") {
+    val board = new Bitboard(size=9, win_chain_length = 5)
+    for (move <- List(0, 1, 9, 10, 18, 19, 27, 28)) {
+      board.make_move(move)
+    }
+    assert (board.get_available_moves().contains(36))
+    assert (!board.get_available_moves().contains(19))
+  }
+  test(testName = "move history construction") {
+    val move_list = List(0, 1, 9, 10, 18, 19, 27, 28)
+    val board = new Bitboard(size=9, win_chain_length = 5)
+    for (move <- move_list) {
+      board.make_move(move)
+    }
+    val board2 = new Bitboard(size=9, win_chain_length = 5, initial_moves = move_list)
+    assert (board2.export() == board.export())
+  }
+  test(testName = "export test") {
+    val board = new Bitboard(size = 9, win_chain_length = 5)
+    for (move <- List(0, 1, 9, 10, 18, 19, 27, 28)) {
+      board.make_move(move)
+    }
+    val recreated_board = Bitboard.create(board.export())
+    assert (board.export() == recreated_board.export())
   }
   test(testName = "mass play") {
     val board = new Bitboard(size=7, win_chain_length = 4)
     //board.make_random_move()
   }
+  test(testName = "rotation") {
+    val transformer = new BoardTransform(size=9)
+    assert (transformer.get_rotated_points(15) == List[Int](15, 55, 19, 11, 65, 25, 61, 69))
+  }
+
+  test(testName = "winning_move") {
+    for (i <- 0 until 100) {
+      val board = new Bitboard(size = 9, win_chain_length = 5)
+      while (!board.game_over()) {
+        board.make_random_move()
+        val last_move = board.move_history.last
+        if (board.game_state == GameState.WIN_PLAYER_1 || board.game_state == GameState.WIN_PLAYER_2) {
+          board.unmove()
+          board.make_move(last_move)
+          assert (board.game_over())
+        }
+      }
+    }
+  }
+
+  test(testName = "test draw") {
+    val moves = List[Int](49, 40, 50, 29, 51, 52, 47, 48, 41, 31, 32, 23, 39, 68, 42, 58, 38, 33, 65, 56, 57, 73, 67, 37, 64, 66,
+    43, 59, 21, 22, 13, 25, 24, 44, 30, 16, 3, 12, 2, 1, 5, 6, 14, 17, 35, 7, 71, 28, 19, 34, 60, 78, 77,
+    62, 46, 54, 55, 36, 20, 45, 63, 18, 27, 53, 15, 9, 0, 69, 10, 75, 74, 8, 79, 72, 80)
+    val board = new Bitboard(size = 9, win_chain_length = 5, initial_moves=moves)
+
+    while (!board.game_over()) {
+      board.make_random_move()
+    }
+
+    assert (board.game_over())
+  }
+  test(testName = "test undo win") {
+    val moves = List[Int](0, 1, 9, 10, 18, 19, 27, 28)
+    val board = new Bitboard(size = 9, win_chain_length = 5, initial_moves=moves)
+
+    board.make_move(36)
+
+    assert (board.game_over())
+
+    board.unmove()
+
+    assert (!board.game_over())
+  }
   /*
-      def test_mass_play(self):
+    def test_winning_move(self):
+        cache = BitBoardCache("../cache/9-magics", size=9, win_chain_length=5, force_build_win_checks=False)
+
         for i in range(1000):
-            board = Board(size=7, win_chain_length=4)
-            board.make_random_move()
-            if board.game_over():
-                self.assertTrue(board.game_won() or board.game_assume_drawn())
-            if board.game_assume_drawn():
-                self.assertTrue(board.game_over())
-      def test_rotator(self):
-        rot = BoardTransform(size=9)
-
-        board = Board(size=9, win_chain_length=5)
-
-        moves = [(0, 0), (2, 1), (5, 5), (4, 4)]
-        for i, move in enumerate(moves):
-            board.move_coord(move[0], move[1])
-            print(board.pprint())
-            index = rot.coordinate_to_index(move[0], move[1])
-            rotated_matrices = rot.get_rotated_matrices(board._matrix.reshape((board.get_size(), board.get_size(), 1)))
-            self.assertFalse(np.equal(rotated_matrices[0], rotated_matrices[2]).all())
-            for point, mat in zip(rot.get_rotated_points(index), rotated_matrices):
-                x, y = rot.index_to_coordinate(point)
-                self.assertEqual(mat[x][y][0], board.get_player_last_move().value)
+            board = BitBoard(cache, size=9, win_chain_length=5, draw_point=50)
+            while not board.game_over():
+                board.make_random_move()
+                last_move = board.get_move_history()[-1]
+                if board.game_status() == GameState_v2.WIN_PLAYER_1 or board.game_status() == GameState_v2.WIN_PLAYER_2:
+                    self.assertTrue(board.is_winning_move(last_move))
    */
 }

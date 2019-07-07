@@ -4,18 +4,22 @@ import breeze.linalg._
 
 import collection.mutable
 import collection.immutable._
-import scala.math.pow
 import util.bitops
+
+import scala.util.Random
+import net.liftweb.json
+import net.liftweb.json.Extraction.decompose
+import net.liftweb.json.JsonAST.compactRender
 
 //TODO: Int should be a class, but not good enough at Scala yet
 
 object Player{
-  val FIRST = new Player("FIRST")
-  val SECOND = new Player("SECOND")
-  val NONE = new Player("NONE")
+  val FIRST = new Player("FIRST", 1)
+  val SECOND = new Player("SECOND", 2)
+  val NONE = new Player("NONE", 0)
 }
 
-class Player(name: String) {
+class Player(name: String, val value: Int) {
   def other(): Player ={
     if (this == Player.FIRST) return Player.SECOND
     else if (this == Player.SECOND) return Player.FIRST
@@ -75,7 +79,7 @@ class BoardTransform(size: Int) {
     }
   }
   // stupid bug where I can't access elements of a densevector
-  def get_rotated_matrices_int(matrix: DenseMatrix[Int]): List[DenseMatrix[Int]] ={
+  def get_rotated_matrices_int(matrix: DenseMatrix[Int]): List[DenseMatrix[Int]] = {
     assert(matrix.rows == size)
 
     List(
@@ -88,23 +92,10 @@ class BoardTransform(size: Int) {
       rot90(matrix, 3),
       rot90(matrix, 3).t,
     )
-
   }
 
-  def get_rotated_matrices(matrix: DenseMatrix[DenseVector[Int]]): List[DenseMatrix[DenseVector[Int]]] ={
-    assert(matrix.rows == size)
-
-    List(
-      matrix,
-      matrix.t,
-      rot90(matrix),
-      rot90(matrix).t,
-      rot90(matrix, 2),
-      rot90(matrix, 2).t,
-      rot90(matrix, 3),
-      rot90(matrix, 3).t,
-    )
-
+  def get_rotated_tensor(tensor: List[DenseMatrix[Int]]): List[List[DenseMatrix[Int]]] = {
+    tensor.map(get_rotated_matrices_int).transpose
   }
 
   def get_rotated_points(point: Int): List[Int] ={
@@ -204,40 +195,65 @@ class BitboardCache(size: Int = 9, win_chain_length: Int = 5) {
     }
 
   }
+}
+
+case class BoardImport(size: Int, win_chain_length: Int, move_history: List[Int])
+
+object Bitboard {
+  // loading a Bitboard from json string
+  def create(json_string: String): Bitboard = {
+    implicit val formats = net.liftweb.json.DefaultFormats
+    val board_import = json.parse(json_string).extract[BoardImport]
+    val board = new Bitboard(size=board_import.size,
+                          win_chain_length=board_import.win_chain_length,
+                          initial_moves=board_import.move_history)
+    board
+  }
   /*
+      def create_board_from_specs(BitBoard, cache, size, win_chain_length, boardstring):
+        board = BitBoard(cache=cache, size=size, win_chain_length=win_chain_length)
+        player_1_moves = []
+        player_2_moves = []
+        reshaped_board = np.array([int(elem) for elem in boardstring]).reshape((size, size))
+        for i in range(size):
+            for j in range(size):
+                index = board._transformer.coordinate_to_index(i, j)
+                if reshaped_board[i][j] == Player.FIRST.value:
+                    player_1_moves.append(index)
+                elif reshaped_board[i][j] == Player.SECOND.value:
+                    player_2_moves.append(index)
 
+        for i in range(len(player_1_moves)):
+            board.blind_move(player_1_moves[i])
+            if i < len(player_2_moves):
+                board.blind_move(player_2_moves[i])
 
-      def _build_win_checks(self):
-        self._delta_masks = []
-        self._win_checks = []
-        for move in range(self._size ** 2):
-            self._delta_masks.append([])
-            self._win_checks.append([])
-            for deltaset_index, deltaset in enumerate(self.DELTA_SETS):
-                self._delta_masks[move].append([])
-                self._win_checks[move].append(set())
-                marked_locations = self._marked_locations(move, deltaset)
-                self._delta_masks[move][deltaset_index] = bitops.bitstring_with(marked_locations)
-                # generate every combination
-                for i in range(1 << len(marked_locations)):
-                    # check for 4 consecutive set bits
-                    if bitops.has_consecutive_bits(i, 4):
-                        marked_location_set_bits = np.array(marked_locations)[bitops.array_of_set_bits(i)]
-                        win_check = bitops.bitstring_with(marked_location_set_bits)
-                        self._win_checks[move][deltaset_index].add(win_check)
+        return board
    */
 }
 
-class Bitboard(size: Int = 9, win_chain_length: Int = 5) {
+class Bitboard(val size: Int = 9,
+               val win_chain_length: Int = 5,
+               initial_moves: List[Int] = List[Int]()) {
   private val cache = new BitboardCache(size, win_chain_length)
   private val transformer = new BoardTransform(size)
 
-  private val move_history = new mutable.ListBuffer[Int]()
   private var _game_state = GameState.NOT_OVER
 
   private val size2 = size * size
 
+  private val _move_history = mutable.ListBuffer[Int]()
+
+  private val full_bitset = BitSet((0 until size2): _*)
   private val bitsets = List[mutable.BitSet](new mutable.BitSet(), new mutable.BitSet())
+
+  _init(initial_moves)
+
+  def _init(initial_moves: List[Int]) {
+    for (move <- initial_moves) {
+      make_move(move)
+    }
+  }
 
   def get_spot(move: Int): Player = {
     if (bitsets.head.contains(move)) {
@@ -253,7 +269,7 @@ class Bitboard(size: Int = 9, win_chain_length: Int = 5) {
   }
 
   def get_player_to_move(): Player = {
-    if (move_history.size % 2 == 0) {
+    if (_move_history.size % 2 == 0) {
       return Player.FIRST
     }
     Player.SECOND
@@ -271,17 +287,17 @@ class Bitboard(size: Int = 9, win_chain_length: Int = 5) {
 
   def blind_move(move: Int): Unit = {
     bitset_of_player_to_move() += move
-    move_history += move
+    _move_history += move
   }
 
   def unmove(): Unit = {
-    val last_move = move_history.last
+    val last_move = _move_history.last
     bitset_of_player_to_move() -= last_move
-    move_history -= last_move
+    _move_history -= last_move
     _game_state = GameState.NOT_OVER
   }
 
-  def move(move: Int): Unit ={
+  def make_move(move: Int): Unit ={
     assert (_game_state == GameState.NOT_OVER)
     blind_move(move)
     _check_game_over(move)
@@ -298,14 +314,51 @@ class Bitboard(size: Int = 9, win_chain_length: Int = 5) {
         _game_state = GameState.WIN_PLAYER_2
       }
     }
-    if (move_history.size == size2) _game_state = GameState.DRAW
+    if (_move_history.size == size2) _game_state = GameState.DRAW
   }
 
-  def game_state(): GameState = _game_state
+  def game_over(): Boolean = {
+    game_state != GameState.NOT_OVER
+  }
+
+  def game_state: GameState = _game_state
+  def get_winning_player: Player = _game_state.winning_player
+  def move_history: List[Int] = _move_history.toList
+
+  def get_available_moves(): BitSet = {
+    full_bitset ^ (bitsets.head | bitsets(1))
+  }
+
+  def move_available(index: Int): Boolean = {
+    get_available_moves().contains(index)
+  }
+
+  def make_random_move(): Unit = {
+    val available_moves = get_available_moves().toList
+    assert (available_moves.nonEmpty)
+    make_move(available_moves(Random.nextInt(available_moves.size)))
+  }
+
+  def export(): String = {
+    var boardstring = ""
+    for (x <- 0 until size) {
+      for (y <- 0 until size) {
+        boardstring += get_spot(transformer.coordinate_to_move(x, y)).value.toString
+      }
+    }
+    val map = HashMap(
+      "size" -> size,
+      "win_chain_length" -> win_chain_length,
+      "move_history" -> _move_history
+    )
+
+    implicit val formats = net.liftweb.json.DefaultFormats
+    compactRender(decompose(map))
+  }
 
   def _display_char(move: Int, last_move_highlight: Boolean): Char = {
-    if (move_history.nonEmpty) {
-      val last_move = move_history.last
+    if (_move_history.nonEmpty) {
+      val last_move = _move_history.last
       val was_last_move = last_move == move
       if (bitsets.head.contains(move)) {
         if (was_last_move && last_move_highlight) {
@@ -322,21 +375,6 @@ class Bitboard(size: Int = 9, win_chain_length: Int = 5) {
     }
     ' '
   }
-  /*    def display_char(self, index, lastmove_highlight):
-        move = utils.peek_stack(self._ops)
-        if move is not None:
-            was_last_move = (index == move)
-            if bitops.get_bit(self.bitstrings[0], index):
-                if was_last_move and lastmove_highlight:
-                    return 'X'
-                return 'x'
-            elif bitops.get_bit(self.bitstrings[1], index):
-                if was_last_move and lastmove_highlight:
-                    return 'O'
-                return 'o'
-        return ' '
-
-   */
 
   def pprint(last_move_highlight: Boolean = true): String = {
     var board_string = " "
@@ -352,16 +390,4 @@ class Bitboard(size: Int = 9, win_chain_length: Int = 5) {
     }
     board_string
   }
-  /*
-      def pprint(self, lastmove_highlight=True):
-        board_string = " "
-        for i in range(self._size):
-            board_string += ' ' + str(i)
-        for i in range(self._size):
-            board_string += "\n" + str(i)
-            for j in range(self._size):
-                board_string += "|" + self.display_char(self._transformer.coordinate_to_index(j, i), lastmove_highlight)
-            board_string += "|"
-        return board_string
-   */
 }

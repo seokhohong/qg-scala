@@ -27,5 +27,8 @@ resolvers ++= Seq(
 
 libraryDependencies += "org.scalactic" %% "scalactic" % "3.0.8"
 libraryDependencies += "org.scalatest" %% "scalatest" % "3.0.8" % "test"
+
+libraryDependencies += "net.liftweb" %% "lift-json" % "latest.integration"
+libraryDependencies += "org.platanios" %% "tensorflow" % "0.4.0" classifier "darwin-cpu-x86_64"
 // or 2.11.8
 //scalaVersion := "2.10.4"
