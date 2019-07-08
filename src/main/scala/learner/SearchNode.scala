@@ -31,33 +31,32 @@ object SearchNode {
       "q-draw-weight": higher draw weight means preferring positions of higher draw likelihood, all things being equal
    */
   def make_root(is_maximizing: Boolean, params: Map[String, Any]): SearchNode = {
-    SearchNode(None, None, is_maximizing, params)
+    new SearchNode(None, None, is_maximizing, params)
   }
 
 }
 class SearchNode private (parent: Option[SearchNode] = None, move: Option[Int], val is_maximizing: Boolean, params: Map[String, Any]) {
   // log of probability of playing this move given root board state (used for PVS search)
-  var log_total_p: Double = parent match {
-    case Some(`parent`) => SearchNode.UNASSIGNED_P
-    case None => 0
-  }
+  var log_total_p: Double = parent.map(_ => SearchNode.UNASSIGNED_P) getOrElse 0
 
   private var _principal_variation: SearchNode = this
 
   private var _self_q: DenseVector[Double] = SearchNode.UNASSIGNED_Q
 
-  private val _parents: mutable.Set[SearchNode] = parent.map(mutable.Set[SearchNode](_)) getOrElse mutable.Set[SearchNode]()
+  val parents: mutable.Set[SearchNode] = parent.map(mutable.Set[SearchNode](_)) getOrElse mutable.Set[SearchNode]()
 
-  val _full_move_list: MoveSeq = parent.map(_._full_move_list) getOrElse MoveSeq.empty()
-  val _is_maximizing: Boolean = parent.map(!_._is_maximizing) getOrElse is_maximizing
+  // this is an example of options being really terrible
+  private val _full_move_list: MoveSeq = move.map(move => (parent.map(_._full_move_list) getOrElse MoveSeq.empty()).append(move)) getOrElse
+    (parent.map(_._full_move_list) getOrElse MoveSeq.empty())
+  private val _is_maximizing: Boolean = parent.map(!_._is_maximizing) getOrElse is_maximizing
 
   // is the game over with this move list
   private var _game_state: GameState = GameState.NOT_OVER
 
   // key is move index (just an integer)
-  private val _children = Map[Int, SearchNode]()
+  private val _children = mutable.Map[Int, SearchNode]()
 
-  private val _children_with_q = mutable.Set[SearchNode]()
+  private val _children_with_q = mutable.ListBuffer[SearchNode]()
 
   // current best child
   private var _best_child: Option[SearchNode] = None
@@ -65,14 +64,18 @@ class SearchNode private (parent: Option[SearchNode] = None, move: Option[Int], 
   private var _move_goodness: Double = 0.0
 
   def add_parent(parent: SearchNode, move: Int): Unit = {
-    _parents += parent
+    assert (parent != this)
+    parents += parent
     parent._children(move) = this
     if (assigned_q())
-      parent._children_with_q += this
+      if (!parent._children_with_q.contains(this))
+        parent._children_with_q += this
   }
 
   def create_child(move: Int): SearchNode = {
-    SearchNode(this, move, !is_maximizing, params)
+    val new_child = new SearchNode(Some(this), Some(move), !is_maximizing, params)
+    add_child(new_child, move)
+    new_child
   }
 
   def add_child(child: SearchNode, move: Int): Unit = child.add_parent(this, move)
@@ -81,11 +84,13 @@ class SearchNode private (parent: Option[SearchNode] = None, move: Option[Int], 
   def has_child(move: Int): Boolean = _children.contains(move)
   def get_child(move: Int): SearchNode = _children(move)
   def get_children(): Iterator[SearchNode] = _children.valuesIterator
-  def has_parents(): Boolean = _parents.nonEmpty
+  def has_parents(): Boolean = parents.nonEmpty
+  def get_move_list(): MoveSeq = _full_move_list
 
   def pv(): SearchNode = _principal_variation
   def move_goodness(): Double = _move_goodness
   def game_state(): GameState = _game_state
+  def game_over(): Boolean = _game_state.game_over
 
   def get_q(): DenseVector[Double] = {
     if (has_nonself_pv()) _principal_variation.get_q()
@@ -95,11 +100,12 @@ class SearchNode private (parent: Option[SearchNode] = None, move: Option[Int], 
   def has_nonself_pv(): Boolean = _principal_variation != this
   def get_q(q_index: Int): Double = _principal_variation.get_q()(q_index)
   def assigned_q(): Boolean = _principal_variation._self_q != SearchNode.UNASSIGNED_Q || has_nonself_pv()
+  def assigned_p(): Boolean = log_total_p != SearchNode.UNASSIGNED_P
   def pv_depth(): Int = _principal_variation._full_move_list.moves.size
 
   def assign_p(p: Double): Unit = {
-    assert (log_total_p == SearchNode.UNASSIGNED_P)
-    log_total_p = _parents.head.log_total_p + p
+    //assert (log_total_p == SearchNode.UNASSIGNED_P)
+    log_total_p = parents.head.log_total_p + p
   }
 
   // returns the move that moves us to the current state from the parent
@@ -109,7 +115,7 @@ class SearchNode private (parent: Option[SearchNode] = None, move: Option[Int], 
       if (this == child)
         return move
     }
-    throw IndexOutOfBoundsException
+    throw new AssertionError("get_move_relationship was called on a parent child pair that does not exist")
   }
 
   // when we're assigning a final game state
@@ -125,44 +131,47 @@ class SearchNode private (parent: Option[SearchNode] = None, move: Option[Int], 
 
   // assigning q value to a leaf node
   def assign_leaf_q(q: DenseVector[Double]): Unit = {
-    assert (!assigned_q())
+    //is there a way to check this without compiler optimizing this out?
+    //assert (!assigned_q())
     assert (q.size == 3)
     _self_q = q
     _update_q(this)
   }
 
   // should only be called after the q is directly updated
-  def _update_q(pv: SearchNode): Unit = {
+  private def _update_q(pv: SearchNode): Unit = {
     assert (SearchNode.MIN_Q <= get_q()(SearchNode.DRAW_INDEX))
-    for (parent <- _parents) {
-      parent._children_with_q += this
+    for (parent <- parents) {
+      if (!parent._children_with_q.contains(this))
+        parent._children_with_q += this
     }
     _compute_move_goodness()
   }
 
   // used to evaluate how good a particular node is
-  def _compute_move_goodness(): Unit = {
+  private def _compute_move_goodness(): Unit = {
     val q_value = params("q_draw_vector").asInstanceOf[DenseVector[Double]].dot(get_q())
 
     // if there's a hard game-end conclusion, we want to pick shorter wins and longer losses
     if (_principal_variation._game_state.game_over) {
       val length_penalty = SearchNode.EPSILON * pv_depth() * (get_q(SearchNode.P1_WIN_INDEX) - get_q(SearchNode.P2_WIN_INDEX))
-      _move_goodness = q_value + length_penalty
+      _move_goodness = q_value - length_penalty
     }
-    q_value
   }
-  def _update_pv(): Unit = {
+
+  private def _update_pv(): Unit = {
     // we are going to have to frequently search for the max, so might as well sort while we're at it
-    if (is_maximizing)
-      _best_child = Option[SearchNode](_children_with_q.maxBy(_._move_goodness))
-    else
-      _best_child = Option[SearchNode](_children_with_q.minBy(_._move_goodness))
+    val best_child: SearchNode = if (is_maximizing) _children_with_q.maxBy(_._move_goodness) else _children_with_q.minBy(_._move_goodness)
 
-    // our new PV is our best child's pv, or might just be best child if it doesn't have a pv
-    _principal_variation = _best_child.map(_._principal_variation) getOrElse _best_child
+    _best_child = Some(best_child)
+    // our new PV is our best child's pv, or might just be ourselves if it doesn't have a pv
+    // I believe we should always have a best_child at this point...
+    assert (_best_child.isDefined)
+    _principal_variation = _best_child.map(_.pv()) getOrElse this
+    _compute_move_goodness()
   }
 
-  def _is_better_than(other: SearchNode): Boolean = {
+  private def _is_better_than(other: SearchNode): Boolean = {
     is_maximizing && _move_goodness > other._move_goodness
   }
 
@@ -170,33 +179,17 @@ class SearchNode private (parent: Option[SearchNode] = None, move: Option[Int], 
   def update_pv(): Unit ={
     assert (has_children())
     _update_pv()
-    for (parent <- _parents) {
+    for (parent <- parents) {
       // if we're guaranteed to update the pv
       // 1. there is no pv from the parent
       // 2. this child is the pv
       // 3. this child should be the pv but isn't right now
+      print(parent._best_child.contains(this))
       if (parent._best_child.isEmpty || parent._best_child.contains(this) || parent._best_child.exists(_is_better_than)) {
-        update_pv()
+        parent.update_pv()
       }
     }
   }
-  /*
-        # this should only be called on a parent node
-        assert len(self.children_with_q) > 0
-
-        self.update_best_child()
-
-        self._update_pv(self.best_child.get_principal_variation())
-
-        # update parents
-        for parent in self._parents:
-            # if this node is in the PV line
-            if parent.best_child == self or parent.best_child is None or (
-                    (parent.is_maximizing and self.better_q(parent.best_child)) or
-                    (not parent.is_maximizing and not self.better_q(parent.best_child))
-            ):
-                parent.recalculate_q()
-   */
 
   // because with transpositions, it is not guaranteed that the pv's move ordering is the most likely one
   def calculate_pv_order(): List[Int] = {
@@ -205,8 +198,8 @@ class SearchNode private (parent: Option[SearchNode] = None, move: Option[Int], 
     while (current.has_parents()) {
       var largest_p = Double.NegativeInfinity
       var best_move = 0
-      var best_parent: SearchNode = current._parents.head
-      for (parent <- current._parents) {
+      var best_parent: SearchNode = current.parents.head
+      for (parent <- current.parents) {
         if (parent.log_total_p > largest_p) {
           best_move = current.get_move_relationship(parent)
           best_parent = parent
@@ -227,7 +220,8 @@ class SearchNode private (parent: Option[SearchNode] = None, move: Option[Int], 
     else "(ROOT)"
 
     def assemble_string(pv: SearchNode): String = {
-      f"PV: $coord_moves Q*: $pv.move_goodness P: $pv.log_total_p $pv.height%.4f"
+      f"PV: $coord_moves Q*: ${pv.move_goodness()}%1.4f P: ${pv.log_total_p}%1.4f Q: (${pv.get_q(SearchNode.P1_WIN_INDEX)}%1.4f" +
+        f", ${pv.get_q(SearchNode.DRAW_INDEX)}, ${pv.get_q(SearchNode.P2_WIN_INDEX)})"
     }
     assemble_string(_principal_variation)
   }

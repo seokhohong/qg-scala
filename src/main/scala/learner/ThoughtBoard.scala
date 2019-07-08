@@ -1,0 +1,5 @@
+package learner
+
+class ThoughtBoard {
+
+}

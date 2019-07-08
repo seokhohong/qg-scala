@@ -33,6 +33,15 @@ object GameState{
   val DRAW = new GameState("DRAW", true, Player.NONE)
   val WIN_PLAYER_1 = new GameState("WIN_PLAYER_1", true, Player.FIRST)
   val WIN_PLAYER_2 = new GameState("WIN_PLAYER_2", true, Player.SECOND)
+
+  // Returns the GameState associated with a win for player Player
+  def win_state_for(player: Player): GameState = {
+    player match {
+      case Player.FIRST => WIN_PLAYER_1
+      case Player.SECOND => WIN_PLAYER_2
+      case _ => throw new IllegalArgumentException
+    }
+  }
 }
 
 class GameState(_name: String, _game_over: Boolean, _winning_player: Player){
@@ -174,6 +183,7 @@ class BitboardCache(size: Int = 9, win_chain_length: Int = 5) {
 
   def check_win(bitset: mutable.BitSet, move: Int): Boolean = {
     for (i <- 0 until 4) {
+      // bitset is changed too much to be immutable, in my opinion
       if (_win_checks((move, i)).contains(bitset & _delta_masks((move, i)))) {
         return true
       }
@@ -299,22 +309,18 @@ class Bitboard(val size: Int = 9,
 
   def make_move(move: Int): Unit ={
     assert (_game_state == GameState.NOT_OVER)
-    blind_move(move)
     _check_game_over(move)
+    blind_move(move)
   }
 
-  //call after making a move
+  def is_winning_move(move: Int): Boolean = cache.check_win(bitset_of_player_to_move(), move)
+
+  //call before making a move
   def _check_game_over(move: Int): Unit ={
-    val last_player = get_player_to_move().other()
-    if (cache.check_win(bitset_of_player(last_player), move)) {
-      if (get_player_to_move() == Player.SECOND) {
-        _game_state = GameState.WIN_PLAYER_1
-      }
-      else {
-        _game_state = GameState.WIN_PLAYER_2
-      }
+    if (is_winning_move(move)) {
+      _game_state = GameState.win_state_for(get_player_to_move())
     }
-    if (_move_history.size == size2) _game_state = GameState.DRAW
+    else if (_move_history.size == size2) _game_state = GameState.DRAW
   }
 
   def game_over(): Boolean = {

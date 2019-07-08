@@ -12,7 +12,6 @@ class ModelTest extends FunSuite {
     val fboard = new FeatureBoard(board)
 
     val tensor_input = Tensor[Float](fboard.get_q_features().toArray).reshape(Shape(1, 9, 9, 4))
-    val seq = model.predict(tensor_input)
-    assert (seq.head.entriesIterator.toArray.apply(0).asInstanceOf[Float] < 0.38)
+    assert (model.predict(tensor_input).head(0) < 0.38)
   }
 }
