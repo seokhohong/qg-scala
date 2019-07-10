@@ -1,5 +1,6 @@
 # Created by Jayesh J.
 
+*.net
 *.class
 *.log
 *.iml

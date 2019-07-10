@@ -12,8 +12,9 @@ object SearchNode {
   val MAX_MODEL_Q: Double = 1.0 - 1E-4
   val MIN_Q: Double = -MAX_Q
   val MIN_MODEL_Q: Double = -MAX_MODEL_Q
-  val UNASSIGNED_Q: DenseVector[Double] = DenseVector(Double.NaN, Double.NaN, Double.NaN)
-  val UNASSIGNED_P: Double = Double.NaN
+  val LARGE_VALUE: Double = 10
+  val UNASSIGNED_Q: DenseVector[Double] = DenseVector(-LARGE_VALUE, -LARGE_VALUE, -LARGE_VALUE)
+  val UNASSIGNED_P: Double = LARGE_VALUE
 
   // Q index, since q-values are a tuple
   val P1_WIN_INDEX = 0
@@ -46,8 +47,9 @@ class SearchNode private (parent: Option[SearchNode] = None, move: Option[Int], 
   val parents: mutable.Set[SearchNode] = parent.map(mutable.Set[SearchNode](_)) getOrElse mutable.Set[SearchNode]()
 
   // this is an example of options being really terrible
-  private val _full_move_list: MoveSeq = move.map(move => (parent.map(_._full_move_list) getOrElse MoveSeq.empty()).append(move)) getOrElse
-    (parent.map(_._full_move_list) getOrElse MoveSeq.empty())
+  private val base_list = parent.map(_.get_move_list()) getOrElse MoveSeq.empty()
+  private val _full_move_list = move.map(base_list.append) getOrElse base_list
+
   private val _is_maximizing: Boolean = parent.map(!_._is_maximizing) getOrElse is_maximizing
 
   // is the game over with this move list
@@ -88,18 +90,25 @@ class SearchNode private (parent: Option[SearchNode] = None, move: Option[Int], 
   def get_move_list(): MoveSeq = _full_move_list
 
   def pv(): SearchNode = _principal_variation
+  def best_move(): Option[Int] = _best_child.map(_.get_move_list().moves.head)
   def move_goodness(): Double = _move_goodness
   def game_state(): GameState = _game_state
   def game_over(): Boolean = _game_state.game_over
+  def has_self_q(): Boolean = _self_q != SearchNode.UNASSIGNED_Q
+
+  // returns if we don't need to search for a better move
+  def is_perfect_move(): Boolean =  (_game_state == GameState.WIN_PLAYER_1 && get_q() == SearchNode.P1_WIN_Q) ||
+                                    (_game_state == GameState.WIN_PLAYER_2 && get_q() == SearchNode.P2_WIN_Q)
 
   def get_q(): DenseVector[Double] = {
-    if (has_nonself_pv()) _principal_variation.get_q()
+    if (has_nonself_pv())
+      return _principal_variation.get_q()
     _self_q
   }
 
   def has_nonself_pv(): Boolean = _principal_variation != this
   def get_q(q_index: Int): Double = _principal_variation.get_q()(q_index)
-  def assigned_q(): Boolean = _principal_variation._self_q != SearchNode.UNASSIGNED_Q || has_nonself_pv()
+  def assigned_q(): Boolean = has_self_q() || has_nonself_pv()
   def assigned_p(): Boolean = log_total_p != SearchNode.UNASSIGNED_P
   def pv_depth(): Int = _principal_variation._full_move_list.moves.size
 

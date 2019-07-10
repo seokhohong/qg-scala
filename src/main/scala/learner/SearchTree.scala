@@ -1,10 +1,14 @@
 package learner
 
+import java.util.Calendar
+
+import breeze.linalg.support.CanTransformValues
 import core._
 import breeze.linalg.{DenseVector, clip}
 import breeze.numerics._
 import org.platanios.tensorflow.api.{Graph, Session, Shape, Tensor}
 import org.platanios.tensorflow.api.tensors.ops.Basic
+import scala.util.control.Breaks._
 
 import scala.collection.mutable
 
@@ -16,10 +20,12 @@ class SearchTree(board: Bitboard,
                  validation: Boolean = false) {
   private val is_maximizing = if (board.get_player_to_move() == Player.FIRST) true else false
 
-  private val root_node = SearchNode.make_root(is_maximizing, search_params)
+  private val _search_params = initial_compute_of_params(search_params)
+
+  val root_node: SearchNode = SearchNode.make_root(is_maximizing, _search_params)
   private val transformer = new BoardTransform(board.size)
 
-  private var expandable_nodes = Set[SearchNode](root_node)
+  private var expandable_nodes = mutable.Set[SearchNode](root_node)
   private var _top_all_p = List[SearchNode](root_node)
 
   private var expansion_history = Set[SearchNode](root_node)
@@ -27,10 +33,10 @@ class SearchTree(board: Bitboard,
   private val transpositionTable = new TranspositionTable[SearchNode]()
   private val feature_board = new FeatureBoard(board)
 
-  private val _search_params = initial_compute_of_params(search_params)
+
 
   def initial_compute_of_params(params_base: Map[String, Any]): Map[String, Any] = {
-    val draw_weight = params_base("q_draw_weight").asInstanceOf[Int]
+    val draw_weight = params_base("q_draw_weight").asInstanceOf[Double]
     params_base + ("q_draw_vector" -> DenseVector[Double](1.0 - draw_weight, draw_weight, draw_weight - 1))
   }
 
@@ -46,6 +52,12 @@ class SearchTree(board: Bitboard,
     }
   }
 
+  def add_expand_node(node: SearchNode): Unit ={
+    expandable_nodes += node
+  }
+
+  def transposition_hits(): Int = transpositionTable.hits
+
   def remove_expand_nodes(parents: Set[SearchNode]): Unit = {
     expandable_nodes --= parents
   }
@@ -54,9 +66,6 @@ class SearchTree(board: Bitboard,
     val child_transposition_hash = parent.get_move_list().hash_with_append(move)
 
     val lookup_child: Option[SearchNode] = transpositionTable.get_from_position_hash(child_transposition_hash)
-
-    val to_update = mutable.Set[SearchNode]()
-    val to_expand = mutable.Set[SearchNode]()
 
     if (lookup_child.isDefined) {
       lookup_child.foreach(_.add_parent(parent, move))
@@ -70,88 +79,67 @@ class SearchTree(board: Bitboard,
         child.assign_hard_q(board.game_state)
         board.unmove()
 
-        // since children don't automatically update their q/pv's, we aggregate the parents and do it all together
-        to_update += parent
+        // we would normally update q value here, but we do it outside this function
       } else {
         // normal expansion
-        to_expand += child
+        add_expand_node(child)
       }
-
     }
-    // update pv's of each parent, since we didn't do that
-    to_update.foreach(_.update_pv())
-    // add to the global list of nodes to expand
-    add_expand_nodes(to_expand.toSet)
+  }
 
+  def create_children(parent: SearchNode, prediction_set: DenseVector[Float]): Unit = {
+
+    // children we won't need to expand (i.e. there's a winning move from this position)
+    val nonexpanding_children = mutable.Set[SearchNode]()
+    // move forward
+    parent.get_move_list().moves.foreach(board.make_move)
+
+    breakable {
+      for (move <- board.get_available_moves()) {
+        // this works because move is an index nicely corresponding to the dense vector index
+        if (prediction_set(move) > _search_params("min_child_p").asInstanceOf[Double]) {
+          create_child(parent, move)
+          val child = parent.get_child(move)
+          if (!child.assigned_p())
+            child.assign_p(prediction_set(move))
+          // if this is a guaranteed cutoff
+          if (child.is_perfect_move()) {
+            parent.update_pv()
+            nonexpanding_children += child
+            break
+          }
+        }
+      }
+    }
+    // reset
+    parent.get_move_list().moves.foreach(_ => board.unmove())
+    remove_expand_nodes(nonexpanding_children.toSet)
   }
 
   def compute_p(parents: Set[SearchNode]): Unit = {
-    if (verbose) println("Compute P", parents.size)
+    if (verbose) println(f"Compute P ${parents.size}%d")
 
     val p_features = mutable.ListBuffer[Tensor[Float]]()
     for (node <- parents) {
       node.get_move_list().moves.foreach(feature_board.make_move)
-      p_features += feature_board.get_p_features().toArray
+      p_features += feature_board.get_p_features().t.toArray
       node.get_move_list().moves.foreach(_ => feature_board.unmove())
     }
-    val predictions: Seq[DenseVector[Float]] = policy_est.predict(Basic.stack(p_features).reshape(Shape(p_features.size, board.size, board.size, FeatureBoard.CHANNELS)))
 
-    predictions.foreach(log(_))
-    //predictions.map(scala.math.max(_.asInstanceOf[Int], 0.0.asInstanceOf[Int]))
+    val reshaped = Basic.stack(p_features).reshape(Shape(p_features.size, board.size, board.size, FeatureBoard.CHANNELS))
+    var predictions: Seq[DenseVector[Float]] = policy_est.predict(reshaped)
 
-    //val clipped = logged.
+    predictions.foreach(_.map(x => math.max(math.min(x, 1), -1)))
+    predictions.foreach(log.inPlace(_))
+
+    val view = reshaped(0)(3)(1).entriesIterator.toArray
+
     for ((prediction_set, parent) <- predictions zip parents) {
-      val child_creation_vector = prediction_set
-      // move forward
-      parent.get_move_list().moves.foreach(board.make_move)
-      for (move <- (0 until 81)) {
-        create_child(parent, move)
-        val child = parent.get_child(move)
-        if (!child.assigned_p())
-          child.assign_p(5)
-      }
-      // reset
-      parent.get_move_list().moves.foreach(_ => board.unmove())
+      create_children(parent, prediction_set)
     }
     remove_expand_nodes(parents)
   }
-/*
-    def compute_p(self, parents):
-        if self._verbose:
-            print('Compute P', len(parents))
-        p_features = []
 
-        for node in parents:
-            if self._validations:
-                assert node.log_total_p != PExpNodeV4.UNASSIGNED_P
-                assert node.game_status == GameState_v2.NOT_OVER
-            node_p_features = self.thought_board.get_p_features_after(node.get_move_chain())
-            p_features.append(node_p_features)
-
-
-        p_features_tensor = np.array(p_features).reshape((-1, self.board.get_size(), self.board.get_size(), FeatureBoard_v2.CHANNELS))
-
-        # returns (len(parents), size**2) matrix
-        predictions = self.policy_est.predict(p_features_tensor, batch_size=len(p_features))
-        log_p_predictions = np.log(np.clip(predictions, a_min=keras.backend.epsilon(), a_max=1.))
-
-        # create and assign
-        for prediction_set, parent in zip(log_p_predictions, parents):
-            child_creation_vector = np.logical_and(prediction_set > self.min_child_p,
-                                                   self.thought_board.get_available_move_vector_after(
-                                                       parent.get_move_chain()))
-            # prepare thoughtboard for child creation
-            self.thought_board.make_moves(parent.get_move_chain())
-            for move in child_creation_vector.nonzero()[0]:
-                child = self.create_child(parent, int(move))
-                # may have already been assigned p if we're using transposition table
-                if not child.is_assigned_p():
-                    child.assign_p(prediction_set[move])
-
-            self.thought_board.reset()
-            # remove the parents from possible expanding nodes
-            self.remove_expand_node(parent)
- */
   // Returns a list of top principal variations to expand
   def pv_expansion(to_p_expand: Set[SearchNode]): Set[SearchNode] = {
     if (to_p_expand.isEmpty) return Set[SearchNode]()
@@ -168,69 +156,121 @@ class SearchTree(board: Bitboard,
       }
     }
     if (verbose) println(f"PV Expansion: ${top_pvs.size}%d")
-    top_pvs
+    top_pvs.toSet
   }
 
   def highest_p(k: Int): Set[SearchNode] = {
     expandable_nodes.toList.sortBy(_.log_total_p).toSet
   }
 
-  def p_expand(): Set[SearchNode] = {
+  def p_expand(): Unit = {
     val highest = highest_p(k = _search_params("p_batch_size").asInstanceOf[Int])
-    val top_pvs = pv_expansion(highest)
-    compute_p(highest ++ top_pvs)
-    top_pvs
+    //val top_pvs = pv_expansion(highest)
+    compute_p(highest)
   }
 
   def compute_q(candidates: Set[SearchNode]): Unit = {
     val no_q_candidates =  candidates.filter(!_.assigned_q())
     val all_parents = no_q_candidates.flatMap(_.parents)
-    for (node <- no_q_candidates) {
-      node.get_move_list().moves.foreach(board.make_move)
-      if (board.game_over()) {
 
+    val q_features = mutable.ListBuffer[Tensor[Float]]()
+
+    // pred_q_nodes are all the nodes that will have a q value predicted froom the model
+    val pred_q_nodes = mutable.ListBuffer[SearchNode]()
+    for (node <- no_q_candidates) {
+      node.get_move_list().moves.foreach(feature_board.make_move)
+      if (board.game_over()) {
+        q_features += feature_board.get_q_features().toArray
+        pred_q_nodes += node
+      } else {
+        node.assign_hard_q(board.game_state)
       }
-      node.get_move_list().moves.foreach(_ => board.unmove)
+      node.get_move_list().moves.foreach(_ => feature_board.unmove())
+    }
+
+    if (q_features.isEmpty) return
+
+    val predictions: Seq[DenseVector[Float]] = policy_est.predict(Basic.stack(q_features).reshape(
+            Shape(q_features.size, board.size, board.size, FeatureBoard.CHANNELS)))
+
+    assert (predictions.size == pred_q_nodes.size)
+    (pred_q_nodes, predictions).zipped.foreach((x, y) => x.assign_leaf_q(y.asInstanceOf[DenseVector[Double]]))
+
+    all_parents.foreach(_.update_pv())
+  }
+
+  // this is necessary for learning data, regardless of root pv or whatnot
+  private def make_root_q(): Unit = {
+    val q_features = Tensor[Float](feature_board.get_q_features().toArray)
+    val reshaped = q_features.reshape(Shape(1, board.size, board.size, FeatureBoard.CHANNELS))
+    val prediction = value_est.predict(reshaped).head
+    root_node.assign_leaf_q(prediction.map(_.toDouble))
+  }
+
+  private def q_eval(): Unit = {
+    val top_p = highest_p((_search_params("p_batch_size").asInstanceOf[Int] * _search_params("fraction_q").asInstanceOf[Double]).toInt)
+
+    val top_pvs = pv_expansion(top_p)
+
+    val to_eval = top_pvs
+
+    if (to_eval.nonEmpty) {
+      compute_q(to_eval)
     }
   }
-/*
-    def compute_q(self, candidates):
-        # we compute only for nodes that haven't finished the game
-        q_features = []
-        # recalculate qs only on parents
-        parents = set()
-        original_candidates = len(candidates)
-        assert len(candidates) == len(set(candidates))
-        candidates = [node for node in candidates if not node.is_assigned_q()]
 
-        q_nodes = []
-        for node in candidates:
-            parents.update(node.get_parents())
-            self.thought_board.make_moves(node.get_move_chain())
-            if not self.thought_board.game_over():
-                q_features.append(self.thought_board.get_q_features())
-                q_nodes.append(node)
-            else:
-                node.assign_hard_q(self.thought_board.get_game_status())
-            self.thought_board.reset()
+  def run_iteration(): Unit = {
+    if (expandable_nodes.isEmpty) return
 
-        print('Candidate Q', original_candidates, 'Compute Q', len(q_features))
+    p_expand()
 
-        # if we don't have any q's to expand after hard_q assessment
-        if len(q_features) == 0:
-            return
+    if (verbose) {
+      println(f"Num Leaf Nodes ${expandable_nodes.size}%d, Transposition ${transpositionTable.hits}%d")
+    }
 
-        q_feature_tensor = np.array(q_features).reshape((-1, self.board.get_size(), self.board.get_size(), FeatureBoard_v2.CHANNELS))
+    q_eval()
 
-        q_predictions = np.clip(self.value_est.predict(q_feature_tensor, batch_size=len(q_features)).reshape((-1, 3)),
-                                a_min=PExpNodeV4.MIN_MODEL_Q, a_max=PExpNodeV4.MAX_MODEL_Q)
+    if (!root_node.has_self_q()) {
+      make_root_q()
+    }
 
-        assert len(q_predictions) == len(q_nodes)
-        for i, node in enumerate(q_nodes):
-            node.assign_leaf_q(q_predictions[i])
+    println(root_node)
+  }
 
-        for parent in parents:
-            parent.recalculate_q()
-  */
+  def run_time(custom_duration: Option[Double] = None): Unit = {
+    val duration: Double = custom_duration getOrElse _search_params("max_thinktime").asInstanceOf[Double]
+    val start_time = Calendar.getInstance().getTimeInMillis
+    // convert duration to milliseconds
 
+    while ((Calendar.getInstance().getTimeInMillis - start_time < duration * 1000) && expandable_nodes.nonEmpty) {
+      run_iteration()
+    }
+  }
+}
+
+class Mind(model_file: String, search_params: Map[String, Any], verbose: Boolean = true, validate: Boolean = false) {
+
+  val (value_est, policy_est) = load_models()
+
+  def load_models(): (SimpleModel, SimpleModel) = {
+    (new SimpleModel(f"${model_file}_value.pb", input_name="input_tensor:0", output_name="softmax_output/Softmax:0"),
+            new SimpleModel(f"${model_file}_policy.pb", input_name="tensor_input:0", output_name="output_softmax/Softmax:0")
+      )
+  }
+
+  def make_search(board: Bitboard): SearchTree = {
+    new SearchTree(board, policy_est, value_est, search_params, verbose, validate)
+  }
+
+  def make_move(board: Bitboard, searcher: Option[SearchTree] = None): SearchNode = {
+    val search = searcher getOrElse make_search(board)
+    search.run_time()
+    search.root_node
+  }
+
+  def make_move_debug(board: Bitboard): SearchNode = {
+    val search = make_search(board)
+    search.run_time()
+    search.root_node
+  }
 }

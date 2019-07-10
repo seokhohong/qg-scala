@@ -18,4 +18,10 @@ class TranspositionTest extends FunSuite {
     assert(table.get(m2).contains(6))
     assert(table.get(m3).isEmpty)
   }
+  test(testName = "not hit") {
+    val table = new TranspositionTable[Int]()
+    table.put(MoveSeq.empty(), 10)
+    table.get(MoveSeq.empty().append(10))
+    assert(table.hits == 0)
+  }
 }

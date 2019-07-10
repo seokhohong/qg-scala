@@ -11,12 +11,14 @@ object FeatureBoard {
 class FeatureBoard(board: core.Bitboard) {
   private val _size = board.size
   private val size2 = _size * _size
-  val _move_history = mutable.ListBuffer[Int](board.move_history: _*)
-  val _original_move_length = _move_history.size
+  private val _move_history = mutable.ListBuffer[Int](board.move_history: _*)
+  private val _original_move_length = _move_history.size
 
-  val board_array = DenseMatrix.zeros[Int](_size * _size, FeatureBoard.CHANNELS)
+  private val board_array = DenseMatrix.zeros[Int](_size * _size, FeatureBoard.CHANNELS)
   val _transformer = new BoardTransform(_size)
-  var _player_to_move = board.get_player_to_move()
+  private var _player_to_move = board.get_player_to_move()
+
+  private var depth = 0
 
   _init_board_array(board)
 
@@ -29,10 +31,11 @@ class FeatureBoard(board: core.Bitboard) {
     }
     if (_move_history.nonEmpty) {
       _set_last_move(_move_history.last)
-      _update_last_player()
     }
+    _update_last_player()
   }
 
+  def player_to_move(): Player = _player_to_move
 
   def _init_available_move_vector(): Unit = {
 
@@ -53,10 +56,8 @@ class FeatureBoard(board: core.Bitboard) {
   def get_q_features(): DenseMatrix[Int] = get_features()
 
   def _update_last_player(): Unit = {
-    if (_player_to_move == Player.FIRST)
-      board_array(::, 3) := 1
-    else
-      board_array(::, 3) := -1
+    val last_player_val = if (_player_to_move == Player.FIRST) -1 else 1
+    board_array(::, 3) := last_player_val
   }
 
   def _set_spot(move: Int): Unit = {
@@ -70,22 +71,27 @@ class FeatureBoard(board: core.Bitboard) {
     board_array(move, 1) = 0
   }
   def make_move(move: Int): Unit = {
+    depth += 1
     if (_move_history.nonEmpty)
       _clear_last_move(_move_history.last)
 
     _move_history += move
     _set_spot(move)
     _set_last_move(move)
-    _update_last_player()
     _player_to_move = _player_to_move.other()
+    _update_last_player()
   }
   def unmove(): Unit = {
+    depth -= 1
     val prev_last_move = _move_history.last
     _move_history -= prev_last_move
     _clear_last_move(prev_last_move)
     _clear_spot(prev_last_move)
-    _set_last_move(_move_history.last)
+    if (_move_history.nonEmpty)
+      _set_last_move(_move_history.last)
     _player_to_move = _player_to_move.other()
     _update_last_player()
   }
+  // whether the board is in the reset state
+  def is_reset(): Boolean = depth == 0
 }
