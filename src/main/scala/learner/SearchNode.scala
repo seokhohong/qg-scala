@@ -16,6 +16,9 @@ object SearchNode {
   val UNASSIGNED_Q: DenseVector[Double] = DenseVector(-LARGE_VALUE, -LARGE_VALUE, -LARGE_VALUE)
   val UNASSIGNED_P: Double = LARGE_VALUE
 
+  //dimension of Q vector
+  val Q_DIM: Int = 3
+
   // Q index, since q-values are a tuple
   val P1_WIN_INDEX = 0
   val DRAW_INDEX = 1
@@ -95,6 +98,7 @@ class SearchNode private (parent: Option[SearchNode] = None, move: Option[Int], 
   def game_state(): GameState = _game_state
   def game_over(): Boolean = _game_state.game_over
   def has_self_q(): Boolean = _self_q != SearchNode.UNASSIGNED_Q
+  def self_q(): DenseVector[Double] = _self_q
 
   // returns if we don't need to search for a better move
   def is_perfect_move(): Boolean =  (_game_state == GameState.WIN_PLAYER_1 && get_q() == SearchNode.P1_WIN_Q) ||
@@ -114,6 +118,9 @@ class SearchNode private (parent: Option[SearchNode] = None, move: Option[Int], 
 
   def assign_p(p: Double): Unit = {
     //assert (log_total_p == SearchNode.UNASSIGNED_P)
+    if (parents.isEmpty) {
+      throw new IllegalArgumentException("Cannot assign p to a root node")
+    }
     log_total_p = parents.head.log_total_p + p
   }
 
@@ -165,6 +172,8 @@ class SearchNode private (parent: Option[SearchNode] = None, move: Option[Int], 
     if (_principal_variation._game_state.game_over) {
       val length_penalty = SearchNode.EPSILON * pv_depth() * (get_q(SearchNode.P1_WIN_INDEX) - get_q(SearchNode.P2_WIN_INDEX))
       _move_goodness = q_value - length_penalty
+    } else {
+      _move_goodness = q_value
     }
   }
 
@@ -193,7 +202,6 @@ class SearchNode private (parent: Option[SearchNode] = None, move: Option[Int], 
       // 1. there is no pv from the parent
       // 2. this child is the pv
       // 3. this child should be the pv but isn't right now
-      print(parent._best_child.contains(this))
       if (parent._best_child.isEmpty || parent._best_child.contains(this) || parent._best_child.exists(_is_better_than)) {
         parent.update_pv()
       }
@@ -224,8 +232,8 @@ class SearchNode private (parent: Option[SearchNode] = None, move: Option[Int], 
   override def toString: String = {
     val transformer = new BoardTransform(size=9)
 
-    val coord_moves = if (_full_move_list.moves.nonEmpty)
-      calculate_pv_order().map(transformer.move_to_coordinate(_).toString).mkString(", ")
+    val coord_moves = if (has_nonself_pv() && pv()._full_move_list.moves.nonEmpty)
+      pv().calculate_pv_order().map(transformer.move_to_coordinate(_).toString).mkString(", ")
     else "(ROOT)"
 
     def assemble_string(pv: SearchNode): String = {

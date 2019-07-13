@@ -1,3 +1,5 @@
+package scala
+
 import org.scalatest.FunSuite
 import core._
 import breeze.linalg._
@@ -114,16 +116,4 @@ class BoardTest extends FunSuite {
 
     assert (!board.game_over())
   }
-  /*
-    def test_winning_move(self):
-        cache = BitBoardCache("../cache/9-magics", size=9, win_chain_length=5, force_build_win_checks=False)
-
-        for i in range(1000):
-            board = BitBoard(cache, size=9, win_chain_length=5, draw_point=50)
-            while not board.game_over():
-                board.make_random_move()
-                last_move = board.get_move_history()[-1]
-                if board.game_status() == GameState_v2.WIN_PLAYER_1 or board.game_status() == GameState_v2.WIN_PLAYER_2:
-                    self.assertTrue(board.is_winning_move(last_move))
-   */
 }

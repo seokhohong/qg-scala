@@ -4,12 +4,12 @@ import java.util.Calendar
 
 import breeze.linalg.support.CanTransformValues
 import core._
-import breeze.linalg.{DenseVector, clip}
+import breeze.linalg.{*, DenseMatrix, DenseVector, clip}
 import breeze.numerics._
 import org.platanios.tensorflow.api.{Graph, Session, Shape, Tensor}
 import org.platanios.tensorflow.api.tensors.ops.Basic
-import scala.util.control.Breaks._
 
+import scala.util.control.Breaks._
 import scala.collection.mutable
 
 class SearchTree(board: Bitboard,
@@ -32,7 +32,6 @@ class SearchTree(board: Bitboard,
 
   private val transpositionTable = new TranspositionTable[SearchNode]()
   private val feature_board = new FeatureBoard(board)
-
 
 
   def initial_compute_of_params(params_base: Map[String, Any]): Map[String, Any] = {
@@ -97,15 +96,17 @@ class SearchTree(board: Bitboard,
     breakable {
       for (move <- board.get_available_moves()) {
         // this works because move is an index nicely corresponding to the dense vector index
-        if (prediction_set(move) > _search_params("min_child_p").asInstanceOf[Double]) {
+        val p_score = prediction_set.data(move)
+        if (p_score >= _search_params("min_child_p").asInstanceOf[Double]) {
           create_child(parent, move)
           val child = parent.get_child(move)
           if (!child.assigned_p())
-            child.assign_p(prediction_set(move))
+            child.assign_p(p_score)
           // if this is a guaranteed cutoff
           if (child.is_perfect_move()) {
             parent.update_pv()
-            nonexpanding_children += child
+            // then we shouldn't be expanding anything from this parent node
+            nonexpanding_children ++= parent.get_children()
             break
           }
         }
@@ -127,14 +128,14 @@ class SearchTree(board: Bitboard,
     }
 
     val reshaped = Basic.stack(p_features).reshape(Shape(p_features.size, board.size, board.size, FeatureBoard.CHANNELS))
-    var predictions: Seq[DenseVector[Float]] = policy_est.predict(reshaped)
+    var predictions: DenseMatrix[Float] = policy_est.predict(reshaped)
 
-    predictions.foreach(_.map(x => math.max(math.min(x, 1), -1)))
-    predictions.foreach(log.inPlace(_))
+    //clip and log
+    predictions.foreachValue(x => math.log(math.max(math.min(x, 1), -1)))
 
     val view = reshaped(0)(3)(1).entriesIterator.toArray
 
-    for ((prediction_set, parent) <- predictions zip parents) {
+    for ((prediction_set, parent) <- predictions(::, *).toIndexedSeq zip parents) {
       create_children(parent, prediction_set)
     }
     remove_expand_nodes(parents)
@@ -180,31 +181,37 @@ class SearchTree(board: Bitboard,
     for (node <- no_q_candidates) {
       node.get_move_list().moves.foreach(feature_board.make_move)
       if (board.game_over()) {
-        q_features += feature_board.get_q_features().toArray
-        pred_q_nodes += node
-      } else {
         node.assign_hard_q(board.game_state)
+      } else {
+        q_features += feature_board.get_q_features().t.toArray
+        pred_q_nodes += node
       }
       node.get_move_list().moves.foreach(_ => feature_board.unmove())
     }
 
     if (q_features.isEmpty) return
 
-    val predictions: Seq[DenseVector[Float]] = policy_est.predict(Basic.stack(q_features).reshape(
+    val predictions_tensor: DenseMatrix[Float] = value_est.predict(Basic.stack(q_features).reshape(
             Shape(q_features.size, board.size, board.size, FeatureBoard.CHANNELS)))
 
-    assert (predictions.size == pred_q_nodes.size)
-    (pred_q_nodes, predictions).zipped.foreach((x, y) => x.assign_leaf_q(y.asInstanceOf[DenseVector[Double]]))
+    val predictions: DenseMatrix[Float] = predictions_tensor.reshape(SearchNode.Q_DIM, q_features.size).t
+
+    assert (predictions.rows == pred_q_nodes.size)
+    for (i <- 0 until predictions.rows) {
+      val q_vector = predictions(i, ::).t.map(_.toDouble)
+      pred_q_nodes(i).assign_leaf_q(q_vector / breeze.linalg.sum(q_vector))
+
+    }
 
     all_parents.foreach(_.update_pv())
   }
 
   // this is necessary for learning data, regardless of root pv or whatnot
   private def make_root_q(): Unit = {
-    val q_features = Tensor[Float](feature_board.get_q_features().toArray)
+    val q_features = Tensor[Float](feature_board.get_q_features().t.toArray)
     val reshaped = q_features.reshape(Shape(1, board.size, board.size, FeatureBoard.CHANNELS))
-    val prediction = value_est.predict(reshaped).head
-    root_node.assign_leaf_q(prediction.map(_.toDouble))
+    val prediction = value_est.predict(reshaped)
+    root_node.assign_leaf_q(prediction.toDenseVector.map(_.toDouble))
   }
 
   private def q_eval(): Unit = {
@@ -212,7 +219,9 @@ class SearchTree(board: Bitboard,
 
     val top_pvs = pv_expansion(top_p)
 
-    val to_eval = top_pvs
+    val to_eval = top_pvs ++ top_p
+
+    println("To eval")
 
     if (to_eval.nonEmpty) {
       compute_q(to_eval)
@@ -237,6 +246,12 @@ class SearchTree(board: Bitboard,
     println(root_node)
   }
 
+  def run_iterations(num_iterations: Int): Unit = {
+    for (i <- 0 until num_iterations) {
+      run_iteration()
+    }
+  }
+
   def run_time(custom_duration: Option[Double] = None): Unit = {
     val duration: Double = custom_duration getOrElse _search_params("max_thinktime").asInstanceOf[Double]
     val start_time = Calendar.getInstance().getTimeInMillis
@@ -253,8 +268,8 @@ class Mind(model_file: String, search_params: Map[String, Any], verbose: Boolean
   val (value_est, policy_est) = load_models()
 
   def load_models(): (SimpleModel, SimpleModel) = {
-    (new SimpleModel(f"${model_file}_value.pb", input_name="input_tensor:0", output_name="softmax_output/Softmax:0"),
-            new SimpleModel(f"${model_file}_policy.pb", input_name="tensor_input:0", output_name="output_softmax/Softmax:0")
+    (new SimpleModel(f"${model_file}_value.pb", input_name="input_tensor:0", output_name="output_softmax/Softmax:0"),
+            new SimpleModel(f"${model_file}_policy.pb", input_name="input_tensor:0", output_name="output_softmax/Softmax:0")
       )
   }
 
@@ -268,6 +283,7 @@ class Mind(model_file: String, search_params: Map[String, Any], verbose: Boolean
     search.root_node
   }
 
+  // avoid anonymous function?
   def make_move_debug(board: Bitboard): SearchNode = {
     val search = make_search(board)
     search.run_time()

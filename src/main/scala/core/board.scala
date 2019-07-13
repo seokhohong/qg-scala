@@ -219,27 +219,6 @@ object Bitboard {
                           initial_moves=board_import.move_history)
     board
   }
-  /*
-      def create_board_from_specs(BitBoard, cache, size, win_chain_length, boardstring):
-        board = BitBoard(cache=cache, size=size, win_chain_length=win_chain_length)
-        player_1_moves = []
-        player_2_moves = []
-        reshaped_board = np.array([int(elem) for elem in boardstring]).reshape((size, size))
-        for i in range(size):
-            for j in range(size):
-                index = board._transformer.coordinate_to_index(i, j)
-                if reshaped_board[i][j] == Player.FIRST.value:
-                    player_1_moves.append(index)
-                elif reshaped_board[i][j] == Player.SECOND.value:
-                    player_2_moves.append(index)
-
-        for i in range(len(player_1_moves)):
-            board.blind_move(player_1_moves[i])
-            if i < len(player_2_moves):
-                board.blind_move(player_2_moves[i])
-
-        return board
-   */
 }
 
 class Bitboard(val size: Int = 9,
@@ -254,7 +233,7 @@ class Bitboard(val size: Int = 9,
 
   private val _move_history = mutable.ListBuffer[Int]()
 
-  private val full_bitset = BitSet((0 until size2): _*)
+  private val full_bitset = BitSet(0 until size2: _*)
   private val bitsets = List[mutable.BitSet](new mutable.BitSet(), new mutable.BitSet())
 
   _init(initial_moves)
@@ -311,20 +290,22 @@ class Bitboard(val size: Int = 9,
     assert (_game_state == GameState.NOT_OVER)
     _check_game_over(move)
     blind_move(move)
+    _check_draw()
   }
 
   def is_winning_move(move: Int): Boolean = cache.check_win(bitset_of_player_to_move(), move)
 
   //call before making a move
   def _check_game_over(move: Int): Unit ={
-    if (is_winning_move(move)) {
+    if (is_winning_move(move))
       _game_state = GameState.win_state_for(get_player_to_move())
-    }
-    else if (_move_history.size == size2) _game_state = GameState.DRAW
+  }
+  def _check_draw(): Unit = {
+    if (_move_history.size == size2) _game_state = GameState.DRAW
   }
 
   def game_over(): Boolean = {
-    game_state != GameState.NOT_OVER
+    _game_state != GameState.NOT_OVER
   }
 
   def game_state: GameState = _game_state
@@ -341,6 +322,9 @@ class Bitboard(val size: Int = 9,
 
   def make_random_move(): Unit = {
     val available_moves = get_available_moves().toList
+    if (available_moves.isEmpty) {
+      print("here")
+    }
     assert (available_moves.nonEmpty)
     make_move(available_moves(Random.nextInt(available_moves.size)))
   }
@@ -395,5 +379,9 @@ class Bitboard(val size: Int = 9,
       board_string += "|"
     }
     board_string
+  }
+
+  override def toString: String = {
+    pprint(true)
   }
 }
