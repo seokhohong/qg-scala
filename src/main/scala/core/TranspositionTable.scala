@@ -12,9 +12,6 @@ class TranspositionTable[V] {
     if (table.contains(position_hash)) hits += 1
     table.get(position_hash)
   }
-  def two_val_function(key: MoveSeq, item: Int): Unit = {
-    print("Hi")
-  }
   def put(key: MoveSeq, item: V): Unit = {
     table.put(key.position_hash, item)
   }

@@ -189,6 +189,7 @@ class SearchNode private (parent: Option[SearchNode] = None, move: Option[Int], 
     _compute_move_goodness()
   }
 
+  // whether this node is "better" than another
   private def _is_better_than(other: SearchNode): Boolean = {
     is_maximizing && _move_goodness > other._move_goodness
   }
@@ -234,7 +235,12 @@ class SearchNode private (parent: Option[SearchNode] = None, move: Option[Int], 
 
     val coord_moves = if (has_nonself_pv() && pv()._full_move_list.moves.nonEmpty)
       pv().calculate_pv_order().map(transformer.move_to_coordinate(_).toString).mkString(", ")
-    else "(ROOT)"
+    else if (parents.isEmpty) {
+      "(ROOT)"
+    }
+    else {
+      "(POS): %s".format(_full_move_list.moves.map(transformer.move_to_coordinate(_).toString).mkString(", "))
+    }
 
     def assemble_string(pv: SearchNode): String = {
       f"PV: $coord_moves Q*: ${pv.move_goodness()}%1.4f P: ${pv.log_total_p}%1.4f Q: (${pv.get_q(SearchNode.P1_WIN_INDEX)}%1.4f" +

@@ -2,9 +2,8 @@ package learner
 
 import java.util.Calendar
 
-import breeze.linalg.support.CanTransformValues
 import core._
-import breeze.linalg.{*, DenseMatrix, DenseVector, clip}
+import breeze.linalg.{*, DenseMatrix, DenseVector, clip, Transpose}
 import breeze.numerics._
 import org.platanios.tensorflow.api.{Graph, Session, Shape, Tensor}
 import org.platanios.tensorflow.api.tensors.ops.Basic
@@ -86,17 +85,18 @@ class SearchTree(board: Bitboard,
     }
   }
 
-  def create_children(parent: SearchNode, prediction_set: DenseVector[Float]): Unit = {
+  def create_children(parent: SearchNode, prediction_set: Transpose[DenseVector[Double]]): Unit = {
 
     // children we won't need to expand (i.e. there's a winning move from this position)
     val nonexpanding_children = mutable.Set[SearchNode]()
-    // move forward
-    parent.get_move_list().moves.foreach(board.make_move)
 
+    // move forward
+    val before_state = board.get_available_moves()
+    parent.get_move_list().moves.foreach(board.make_move)
     breakable {
       for (move <- board.get_available_moves()) {
         // this works because move is an index nicely corresponding to the dense vector index
-        val p_score = prediction_set.data(move)
+        val p_score = prediction_set(move)
         if (p_score >= _search_params("min_child_p").asInstanceOf[Double]) {
           create_child(parent, move)
           val child = parent.get_child(move)
@@ -114,6 +114,8 @@ class SearchTree(board: Bitboard,
     }
     // reset
     parent.get_move_list().moves.foreach(_ => board.unmove())
+    assert (board.get_available_moves() == before_state)
+
     remove_expand_nodes(nonexpanding_children.toSet)
   }
 
@@ -121,23 +123,26 @@ class SearchTree(board: Bitboard,
     if (verbose) println(f"Compute P ${parents.size}%d")
 
     val p_features = mutable.ListBuffer[Tensor[Float]]()
+
+    val feat_start_time = Calendar.getInstance().getTimeInMillis
     for (node <- parents) {
       node.get_move_list().moves.foreach(feature_board.make_move)
-      p_features += feature_board.get_p_features().t.toArray
+      //p_features += feature_board.get_p_features()
       node.get_move_list().moves.foreach(_ => feature_board.unmove())
     }
-
+    println("Feat Time %d".format(feat_start_time - Calendar.getInstance().getTimeInMillis))
     val reshaped = Basic.stack(p_features).reshape(Shape(p_features.size, board.size, board.size, FeatureBoard.CHANNELS))
     var predictions: DenseMatrix[Float] = policy_est.predict(reshaped)
 
     //clip and log
-    predictions.foreachValue(x => math.log(math.max(math.min(x, 1), -1)))
-
-    val view = reshaped(0)(3)(1).entriesIterator.toArray
-
-    for ((prediction_set, parent) <- predictions(::, *).toIndexedSeq zip parents) {
-      create_children(parent, prediction_set)
+    val log_predictions = predictions.mapValues { x =>
+      math.log(math.max(math.min(x, 1), -1))
     }
+    val start_time = Calendar.getInstance().getTimeInMillis
+    for (i <- 0 until predictions.rows) {
+      create_children(parents.toList(i), log_predictions(i, ::))
+    }
+    println("Children Time %d".format(start_time - Calendar.getInstance().getTimeInMillis))
     remove_expand_nodes(parents)
   }
 
@@ -176,14 +181,14 @@ class SearchTree(board: Bitboard,
 
     val q_features = mutable.ListBuffer[Tensor[Float]]()
 
-    // pred_q_nodes are all the nodes that will have a q value predicted froom the model
+    // pred_q_nodes are all the nodes that will have a q value predicted from the model
     val pred_q_nodes = mutable.ListBuffer[SearchNode]()
     for (node <- no_q_candidates) {
       node.get_move_list().moves.foreach(feature_board.make_move)
       if (board.game_over()) {
         node.assign_hard_q(board.game_state)
       } else {
-        q_features += feature_board.get_q_features().t.toArray
+        //q_features += feature_board.get_q_features()
         pred_q_nodes += node
       }
       node.get_move_list().moves.foreach(_ => feature_board.unmove())
@@ -208,7 +213,8 @@ class SearchTree(board: Bitboard,
 
   // this is necessary for learning data, regardless of root pv or whatnot
   private def make_root_q(): Unit = {
-    val q_features = Tensor[Float](feature_board.get_q_features().t.toArray)
+    //val q_features = Tensor[Float](feature_board.get_q_features())
+    val q_features = Tensor.zeros[Float](Shape(10))
     val reshaped = q_features.reshape(Shape(1, board.size, board.size, FeatureBoard.CHANNELS))
     val prediction = value_est.predict(reshaped)
     root_node.assign_leaf_q(prediction.toDenseVector.map(_.toDouble))

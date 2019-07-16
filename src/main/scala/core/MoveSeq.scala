@@ -20,6 +20,7 @@ class MoveSeq(val moves: List[Int], val position_hash: List[Int]) {
     (sign * move :: position_hash).sorted
   }
 
+  def get_moves(): List[Int] = moves
   def canEqual(a: Any) = a.isInstanceOf[MoveSeq]
 
   // Step 3 - proper signature for `equals`

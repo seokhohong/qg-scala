@@ -28,6 +28,7 @@ class SimpleModel(model_file: String, input_name: String, output_name: String) {
     val result_seq = predict_tensor(input_values).head
     //val to_array = Basic.splitEvenly(result_seq.head, 0, result_seq.head.shape(0))
     val matrix = new DenseVector[Float](result_seq.entriesIterator.map(_.asInstanceOf[Float]).toArray)
-    matrix.asDenseMatrix.reshape(result_seq.shape(0), result_seq.shape(1))
+    //matrix.asDenseMatrix.reshape(result_seq.shape(0), result_seq.shape(1))
+    matrix.asDenseMatrix.reshape(result_seq.shape(1), result_seq.shape(0)).t
   }
 }

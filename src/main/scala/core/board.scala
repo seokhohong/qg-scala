@@ -103,25 +103,15 @@ class BoardTransform(size: Int) {
     )
   }
 
-  def get_rotated_tensor(tensor: List[DenseMatrix[Int]]): List[List[DenseMatrix[Int]]] = {
-    tensor.map(get_rotated_matrices_int).transpose
-  }
+  def get_rotated_tensor(tensor: List[DenseMatrix[Int]]): List[List[DenseMatrix[Int]]] = tensor.map(get_rotated_matrices_int).transpose
 
-  def get_rotated_points(point: Int): List[Int] ={
-    cached_point_rotations(point)
-  }
+  def get_rotated_points(point: Int): List[Int] = cached_point_rotations(point)
 
-  def coordinate_to_move(x: Int, y: Int): Int ={
-    x * size + y
-  }
+  def coordinate_to_move(x: Int, y: Int): Int = x * size + y
 
-  def move_to_coordinate(index: Int): (Int, Int)={
-    (index / size, index % size)
-  }
+  def move_to_coordinate(index: Int): (Int, Int)= (index / size, index % size)
 
-  def in_bounds(x: Int, y: Int): Boolean={
-    x >= 0 && x < size && y >= 0 && y < size
-  }
+  def in_bounds(x: Int, y: Int): Boolean = x >= 0 && x < size && y >= 0 && y < size
 }
 
 
@@ -168,19 +158,12 @@ class BitboardCache(size: Int = 9, win_chain_length: Int = 5) {
     _check_locations((move, deltaset._1._1, deltaset._1._2)) ++
       _check_locations((move, deltaset._2._1, deltaset._2._2)).sorted
   }
-  /*
-      def _marked_locations(self, index, deltas):
-        board = Board(size=self._size, win_chain_length=self._win_chain_length)
-        all_locations = []
-        for delta in deltas:
-            all_locations.extend(board._check_locations[(index, *delta)])
-        return sorted(all_locations)
-   */
 
   def get_check_locations(move: Int, delta_x: Int, delta_y: Int): List[Int]={
     _check_locations((move, delta_x, delta_y))
   }
 
+  // check a player's bitset plus their move-to-make
   def check_win(bitset: mutable.BitSet, move: Int): Boolean = {
     for (i <- 0 until 4) {
       // bitset is changed too much to be immutable, in my opinion
@@ -234,7 +217,8 @@ class Bitboard(val size: Int = 9,
   private val _move_history = mutable.ListBuffer[Int]()
 
   private val full_bitset = BitSet(0 until size2: _*)
-  private val bitsets = List[mutable.BitSet](new mutable.BitSet(), new mutable.BitSet())
+
+  private val bitsets: Map[Player, mutable.BitSet] = Map[Player, mutable.BitSet](Player.FIRST -> new mutable.BitSet(), Player.SECOND -> new mutable.BitSet())
 
   _init(initial_moves)
 
@@ -245,9 +229,9 @@ class Bitboard(val size: Int = 9,
   }
 
   def get_spot(move: Int): Player = {
-    if (bitsets.head.contains(move)) {
+    if (bitsets(Player.FIRST).contains(move)) {
       return Player.FIRST
-    } else if (bitsets(1).contains(move)) {
+    } else if (bitsets(Player.SECOND).contains(move)) {
       return Player.SECOND
     }
     Player.NONE
@@ -265,13 +249,7 @@ class Bitboard(val size: Int = 9,
   }
 
   private def bitset_of_player_to_move(): mutable.BitSet = {
-    bitset_of_player(get_player_to_move())
-  }
-  private def bitset_of_player(player: Player): mutable.BitSet = {
-    if (player == Player.FIRST) {
-      return bitsets.head
-    }
-    bitsets(1)
+    bitsets(get_player_to_move())
   }
 
   def blind_move(move: Int): Unit = {
@@ -281,7 +259,7 @@ class Bitboard(val size: Int = 9,
 
   def unmove(): Unit = {
     val last_move = _move_history.last
-    bitset_of_player_to_move() -= last_move
+    bitsets(get_player_to_move().other()) -= last_move
     _move_history -= last_move
     _game_state = GameState.NOT_OVER
   }
@@ -313,7 +291,7 @@ class Bitboard(val size: Int = 9,
   def move_history: List[Int] = _move_history.toList
 
   def get_available_moves(): BitSet = {
-    full_bitset ^ (bitsets.head | bitsets(1))
+    full_bitset ^ (bitsets(Player.FIRST) | bitsets(Player.SECOND))
   }
 
   def move_available(index: Int): Boolean = {
@@ -322,9 +300,6 @@ class Bitboard(val size: Int = 9,
 
   def make_random_move(): Unit = {
     val available_moves = get_available_moves().toList
-    if (available_moves.isEmpty) {
-      print("here")
-    }
     assert (available_moves.nonEmpty)
     make_move(available_moves(Random.nextInt(available_moves.size)))
   }
@@ -350,13 +325,13 @@ class Bitboard(val size: Int = 9,
     if (_move_history.nonEmpty) {
       val last_move = _move_history.last
       val was_last_move = last_move == move
-      if (bitsets.head.contains(move)) {
+      if (bitsets(Player.FIRST)(move)) {
         if (was_last_move && last_move_highlight) {
           return 'X'
         }
         return 'x'
       }
-      else if (bitsets(1).contains(move)) {
+      else if (bitsets(Player.SECOND)(move)) {
         if (was_last_move && last_move_highlight) {
           return 'O'
         }

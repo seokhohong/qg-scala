@@ -114,6 +114,7 @@ class BoardTest extends FunSuite {
 
     board.unmove()
 
+    assert (board.get_available_moves().size == 81 - 8)
     assert (!board.game_over())
   }
 }
