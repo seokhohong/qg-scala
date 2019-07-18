@@ -1,14 +1,31 @@
+import java.nio.ByteBuffer
+
 import core._
 import learner._
 import org.scalatest.FunSuite
 import core.SimpleModel
+
 import scala.collection.mutable
-import org.platanios.tensorflow.api.{Tensor, Shape}
+import org.platanios.tensorflow.api.{Shape, Tensor}
 import org.platanios.tensorflow.api.tensors.ops.Basic
 import breeze.linalg.DenseMatrix
 
 class ModelTest extends FunSuite {
   /*
+  test("test unsafe") {
+    val model = new SimpleModel("/models/v4_14_test_value.pb", "input_tensor:0", "softmax_output/Softmax:0")
+    val board = new Bitboard(size=9, win_chain_length = 5)
+    val fboard = new FeatureBoard(board)
+
+    val buffer = NativeTensorWrapper.allocate_floats(324)
+    fboard.write_p_features_inplace(buffer)
+
+    //val prediction = model.predict_to_matrix_unsafe(buffer, 1, 81)
+    val prediction = model.predict_to_matrix_unsafe(buffer)
+    assert (prediction(0, 0) > 0.3)
+    assert (prediction(0, 0) < 0.4)
+  }
+  */
   test("load model") {
     val model = new SimpleModel("/models/v4_14_test_value.pb", "input_tensor:0", "softmax_output/Softmax:0")
     val model2 = new SimpleModel("/models/v4_14_test_policy.pb", "tensor_input:0", "output_softmax/Softmax:0")
@@ -16,8 +33,10 @@ class ModelTest extends FunSuite {
     val board = new Bitboard(size=9, win_chain_length = 5)
     val fboard = new FeatureBoard(board)
 
-    val tensor_input = fboard.get_q_features().reshape(Shape(1, 9, 9, 4))
-    assert (model.predict(tensor_input)(0, 0) > 0.3)
+    val buffer = NativeTensorWrapper.allocate_floats(324)
+    fboard.write_p_features_inplace(buffer)
+    assert (model.predict_to_matrix(buffer)(0, 0) > 0.3)
+    assert (model.predict_to_matrix(buffer)(0, 0) < 0.4)
   }
 
   test("test p model") {
@@ -28,11 +47,10 @@ class ModelTest extends FunSuite {
 
     List[Int](0, 1, 9, 10, 18, 19, 27, 28).foreach(fboard.make_move)
 
-    val tensor_input = fboard.get_p_features().reshape(Shape(1, 9, 9, 4))
+    val buffer = NativeTensorWrapper.allocate_floats(324)
+    fboard.write_p_features_inplace(buffer)
 
-    assert (tensor_input(0)(3)(1).entriesIterator.toArray sameElements Array[Int](0, 1, 1, -1))
-
-    assert (model.predict(tensor_input)(0, 36) > 0.5)
+    assert (model.predict_to_array(buffer)(36) > 0.5)
   }
 
   test("stack p model") {
@@ -43,16 +61,15 @@ class ModelTest extends FunSuite {
 
     List[Int](0, 1, 9, 10, 18, 19, 27, 28).foreach(fboard.make_move)
 
-    val features = new mutable.ListBuffer[Tensor[Float]]()
-    features += fboard.get_p_features()
-    features += fboard.get_p_features()
+    val buffer = NativeTensorWrapper.allocate_floats(324 * 2)
+    fboard.write_p_features_inplace(buffer)
+    fboard.write_p_features_inplace(buffer)
 
-    val tensor_input = Tensor[Float](Basic.stack(features)).reshape(Shape(2, 9, 9, 4))
-
-    assert (model.predict(tensor_input).rows == 2)
-    assert (model.predict(tensor_input).cols == 81)
+    val pred_matrix = model.predict_to_matrix(buffer)
+    assert (pred_matrix.rows == 2)
+    assert (pred_matrix.cols == 81)
+    assert (pred_matrix(0, ::) == pred_matrix(1, ::))
   }
-
   test("validate output orientation model") {
     val model = new SimpleModel("/models/v4_15_policy.pb", "input_tensor:0", "output_softmax/Softmax:0")
 
@@ -63,16 +80,13 @@ class ModelTest extends FunSuite {
     List[Int](54, 63, 28, 22, 3, 31, 24, 40, 32, 23, 41, 25, 50, 13, 4).foreach(fboard_1.make_move)
     List[Int](54, 63, 28, 22, 3, 31, 24, 40, 32, 23, 41, 25, 50, 13, 49).foreach(fboard_2.make_move)
 
-    val features = new mutable.ListBuffer[Tensor[Float]]()
-    features += fboard_1.get_p_features()
-    features += fboard_2.get_p_features()
+    val buffer = NativeTensorWrapper.allocate_floats(324 * 2)
+    fboard_1.write_p_features_inplace(buffer)
+    fboard_2.write_p_features_inplace(buffer)
 
-    val tensor_input = Tensor[Float](Basic.stack(features)).reshape(Shape(2, 9, 9, 4))
-
-    val predictions = model.predict(tensor_input)
+    val predictions = model.predict_to_matrix(buffer)
 
     assert(predictions(0, 49) > 0.5)
     assert(predictions(1, 4) > 0.5)
   }
-*/
 }

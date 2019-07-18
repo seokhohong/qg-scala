@@ -1,7 +1,7 @@
 package main
 
 import core.Bitboard
-import learner.{Mind, SearchNode}
+import learner.Mind
 
 object DebugPlay {
   def main(args: Array[String]): Unit = {

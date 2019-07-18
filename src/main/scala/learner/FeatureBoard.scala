@@ -16,8 +16,8 @@ class FeatureBoard(board: core.Bitboard) {
   private val _move_history = mutable.ListBuffer[Int](board.move_history: _*)
 
   //private val board_array = DenseMatrix.zeros[Int](_size * _size, FeatureBoard.CHANNELS)
-  //private val board_array = Tensor.zeros[Int](Shape(size2, FeatureBoard.CHANNELS))
-  private val board_array = ByteBuffer.wrap(new Array[Byte](size2 * FeatureBoard.CHANNELS * 4))
+  private var board_array = NativeTensorWrapper.allocate_floats(size2 * FeatureBoard.CHANNELS)
+  //private val board_array = ByteBuffer.wrap(new Array[Byte](size2 * FeatureBoard.CHANNELS * 4))
   val _transformer = new BoardTransform(_size)
   private var _player_to_move = board.get_player_to_move()
 
@@ -25,13 +25,17 @@ class FeatureBoard(board: core.Bitboard) {
 
   _init_board_array(board)
 
-  def _set_elem(index: Int, channel: Int, value: Float): Unit = {
+  private def _set_elem(index: Int, channel: Int, value: Float): Unit = {
     val byte_index = (index * FeatureBoard.CHANNELS + channel) * 4
     board_array.putFloat(byte_index, value)
   }
 
 
-  def _init_board_array(board: Bitboard): Unit = {
+  private def _init_board_array(board: Bitboard): Unit = {
+    // fill the buffer with zeros
+    for (i <- 0 until size2 * FeatureBoard.CHANNELS) {
+      board_array.putFloat(i * NativeTensorWrapper.BytesPerFloat,0)
+    }
     for (i <- 0 until size2) {
       if (board.get_spot(i) == Player.FIRST)
         _set_elem(i, 0, 1)
@@ -46,21 +50,19 @@ class FeatureBoard(board: core.Bitboard) {
 
   def player_to_move(): Player = _player_to_move
 
-  def _set_last_move(last_move: Int): Unit = {
+  private def _set_last_move(last_move: Int): Unit = {
     _set_elem(last_move, 2, 1)
   }
 
-  def _clear_last_move(last_move: Int): Unit = {
+  private def _clear_last_move(last_move: Int): Unit = {
     _set_elem(last_move, 2, 0)
   }
 
-  def get_features_as_array(): Array[Float] = {
-    val float_array = new Array[Float](size2 * FeatureBoard.CHANNELS)
-    board_array.asFloatBuffer().get(float_array)
-    float_array
+  def get_features_as_vector(): DenseVector[Float] = {
+    new DenseVector[Float](board_array.toFloatTensor.entriesIterator.toArray)
   }
   def get_features_as_nice_array(): Array[Array[Array[Float]]] = {
-    val flat_array: Array[Float] = get_features_as_array()
+    val flat_array: DenseVector[Float] = get_features_as_vector()
     val nice_array = Array.ofDim[Float](_size, _size, FeatureBoard.CHANNELS)
     for (i <- 0 until _size) {
       for (j <- 0 until _size) {
@@ -72,11 +74,13 @@ class FeatureBoard(board: core.Bitboard) {
     nice_array
   }
   // premature optimization
-  def write_features_inplace(buffer: ByteBuffer): Unit = {
+  def write_features_inplace(buffer: NativeTensorWrapper): Unit = {
     buffer.put(board_array)
+    board_array.buffer.rewind()
   }
-  def write_p_features_inplace(buffer: ByteBuffer): Unit = write_features_inplace(board_array)
-  def write_q_features_inplace(buffer: ByteBuffer): Unit = write_features_inplace(board_array)
+
+  def write_p_features_inplace(buffer: NativeTensorWrapper): Unit = write_features_inplace(buffer)
+  def write_q_features_inplace(buffer: NativeTensorWrapper): Unit = write_features_inplace(buffer)
 
   def _update_last_player(): Unit = {
     val last_player_val = if (_player_to_move == Player.FIRST) -1 else 1
@@ -93,7 +97,7 @@ class FeatureBoard(board: core.Bitboard) {
   }
   def _clear_spot(move: Int): Unit = {
     _set_elem(move, 0, 0)
-    _set_elem(move, 0, 0)
+    _set_elem(move, 1, 0)
   }
   def make_move(move: Int): Unit = {
     depth += 1

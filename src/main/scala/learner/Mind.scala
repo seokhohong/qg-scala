@@ -32,6 +32,8 @@ class SearchTree(board: Bitboard,
   private val transpositionTable = new TranspositionTable[SearchNode]()
   private val feature_board = new FeatureBoard(board)
 
+  private val _size2 = board.size * board.size
+
 
   def initial_compute_of_params(params_base: Map[String, Any]): Map[String, Any] = {
     val draw_weight = params_base("q_draw_weight").asInstanceOf[Double]
@@ -44,6 +46,7 @@ class SearchTree(board: Bitboard,
     expandable_nodes ++= nodes
     if (validation) {
       for (node <- nodes) {
+        assert(!expansion_history.contains(node))
         assert(!node.game_over())
       }
       expansion_history ++= nodes
@@ -52,6 +55,8 @@ class SearchTree(board: Bitboard,
 
   def add_expand_node(node: SearchNode): Unit ={
     expandable_nodes += node
+    if (validation)
+      assert(!expansion_history.contains(node))
   }
 
   def transposition_hits(): Int = transpositionTable.hits
@@ -122,17 +127,15 @@ class SearchTree(board: Bitboard,
   def compute_p(parents: Set[SearchNode]): Unit = {
     if (verbose) println(f"Compute P ${parents.size}%d")
 
-    val p_features = mutable.ListBuffer[Tensor[Float]]()
+    val p_features = NativeTensorWrapper.allocate_floats(parents.size * _size2 * FeatureBoard.CHANNELS)
 
     val feat_start_time = Calendar.getInstance().getTimeInMillis
     for (node <- parents) {
       node.get_move_list().moves.foreach(feature_board.make_move)
-      //p_features += feature_board.get_p_features()
+      feature_board.write_p_features_inplace(p_features)
       node.get_move_list().moves.foreach(_ => feature_board.unmove())
     }
-    println("Feat Time %d".format(feat_start_time - Calendar.getInstance().getTimeInMillis))
-    val reshaped = Basic.stack(p_features).reshape(Shape(p_features.size, board.size, board.size, FeatureBoard.CHANNELS))
-    var predictions: DenseMatrix[Float] = policy_est.predict(reshaped)
+    val predictions = policy_est.predict_to_matrix(p_features)
 
     //clip and log
     val log_predictions = predictions.mapValues { x =>
@@ -142,7 +145,6 @@ class SearchTree(board: Bitboard,
     for (i <- 0 until predictions.rows) {
       create_children(parents.toList(i), log_predictions(i, ::))
     }
-    println("Children Time %d".format(start_time - Calendar.getInstance().getTimeInMillis))
     remove_expand_nodes(parents)
   }
 
@@ -166,12 +168,12 @@ class SearchTree(board: Bitboard,
   }
 
   def highest_p(k: Int): Set[SearchNode] = {
-    expandable_nodes.toList.sortBy(_.log_total_p).toSet
+    expandable_nodes.toList.sortBy(_.log_total_p).reverse.slice(0, k).toSet
   }
 
   def p_expand(): Unit = {
     val highest = highest_p(k = _search_params("p_batch_size").asInstanceOf[Int])
-    //val top_pvs = pv_expansion(highest)
+    val top_pvs = pv_expansion(highest)
     compute_p(highest)
   }
 
@@ -179,33 +181,35 @@ class SearchTree(board: Bitboard,
     val no_q_candidates =  candidates.filter(!_.assigned_q())
     val all_parents = no_q_candidates.flatMap(_.parents)
 
-    val q_features = mutable.ListBuffer[Tensor[Float]]()
-
     // pred_q_nodes are all the nodes that will have a q value predicted from the model
     val pred_q_nodes = mutable.ListBuffer[SearchNode]()
+
+    // deal with the nodes with hard q
     for (node <- no_q_candidates) {
-      node.get_move_list().moves.foreach(feature_board.make_move)
-      if (board.game_over()) {
+      node.get_move_list().moves.foreach(board.make_move)
+      if (board.game_over())
         node.assign_hard_q(board.game_state)
-      } else {
-        //q_features += feature_board.get_q_features()
+      else
         pred_q_nodes += node
-      }
+      node.get_move_list().moves.foreach(_ => board.unmove())
+    }
+
+    if (pred_q_nodes.isEmpty) return
+
+    // make the q predictions
+    val q_features = NativeTensorWrapper.allocate_floats(pred_q_nodes.size * _size2 * FeatureBoard.CHANNELS)
+    for (node <- pred_q_nodes) {
+      node.get_move_list().moves.foreach(feature_board.make_move)
+      feature_board.write_p_features_inplace(q_features)
       node.get_move_list().moves.foreach(_ => feature_board.unmove())
     }
 
-    if (q_features.isEmpty) return
-
-    val predictions_tensor: DenseMatrix[Float] = value_est.predict(Basic.stack(q_features).reshape(
-            Shape(q_features.size, board.size, board.size, FeatureBoard.CHANNELS)))
-
-    val predictions: DenseMatrix[Float] = predictions_tensor.reshape(SearchNode.Q_DIM, q_features.size).t
+    val predictions = value_est.predict_to_matrix(q_features)
 
     assert (predictions.rows == pred_q_nodes.size)
     for (i <- 0 until predictions.rows) {
       val q_vector = predictions(i, ::).t.map(_.toDouble)
       pred_q_nodes(i).assign_leaf_q(q_vector / breeze.linalg.sum(q_vector))
-
     }
 
     all_parents.foreach(_.update_pv())
@@ -213,10 +217,10 @@ class SearchTree(board: Bitboard,
 
   // this is necessary for learning data, regardless of root pv or whatnot
   private def make_root_q(): Unit = {
+    val q_features = NativeTensorWrapper.allocate_floats(_size2 * FeatureBoard.CHANNELS)
     //val q_features = Tensor[Float](feature_board.get_q_features())
-    val q_features = Tensor.zeros[Float](Shape(10))
-    val reshaped = q_features.reshape(Shape(1, board.size, board.size, FeatureBoard.CHANNELS))
-    val prediction = value_est.predict(reshaped)
+    feature_board.write_p_features_inplace(q_features)
+    val prediction = value_est.predict_to_matrix(q_features)
     root_node.assign_leaf_q(prediction.toDenseVector.map(_.toDouble))
   }
 
