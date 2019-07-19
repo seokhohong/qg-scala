@@ -4,6 +4,7 @@ import breeze.linalg.DenseVector
 import core.{BoardTransform, GameState, MoveSeq}
 
 import scala.collection.mutable
+import scala.math
 
 object SearchNode {
   // Q-constants
@@ -177,11 +178,24 @@ class SearchNode private (parent: Option[SearchNode] = None, move: Option[Int], 
     }
   }
 
-  private def _update_pv(): Unit = {
-    // we are going to have to frequently search for the max, so might as well sort while we're at it
-    val best_child: SearchNode = if (is_maximizing) _children_with_q.maxBy(_._move_goodness) else _children_with_q.minBy(_._move_goodness)
+  // returns the leaf node with highest P
+  // assumes that this node does not have explored children
+  def deepest_unexplored(): SearchNode = {
+    assert (!assigned_q())
+    if (!has_children()) {
+      return this
+    }
+    get_children().maxBy(_.log_total_p).deepest_unexplored()
+  }
 
+  private def _update_pv(): Unit = {
+    assert (_children_with_q.nonEmpty)
+
+    // we are going to have to frequently search for the max, so might as well sort while we're at it
+    // right now we do just max or minsearch
+    val best_child: SearchNode = if (is_maximizing) _children_with_q.maxBy(_._move_goodness) else _children_with_q.minBy(_._move_goodness)
     _best_child = Some(best_child)
+
     // our new PV is our best child's pv, or might just be ourselves if it doesn't have a pv
     // I believe we should always have a best_child at this point...
     assert (_best_child.isDefined)
@@ -207,6 +221,47 @@ class SearchNode private (parent: Option[SearchNode] = None, move: Option[Int], 
         parent.update_pv()
       }
     }
+  }
+
+  class SearchQuality() {
+    val children_counts: mutable.Map[SearchNode, Int] = mutable.Map[SearchNode, Int]()
+    val scores: mutable.Map[SearchNode, Double] = mutable.Map[SearchNode, Double]()
+    var composite_score: Double = 0
+
+    compute()
+    private def compute(): Unit = {
+      count_children(SearchNode.this)
+
+      // each node will have counted itself via this algorithm
+      for (node <- children_counts.keys) {
+        children_counts(node) -= 1
+      }
+
+      recurse_score_node(SearchNode.this)
+      composite_score = scores.values.sum / scores.values.size
+    }
+    private def count_children(node: SearchNode): Unit = {
+      for (child <- node.get_children()) {
+        count_children(child)
+      }
+      children_counts(node) = node.get_children().map(children_counts(_)).sum + 1
+    }
+    private def recurse_score_node(node: SearchNode): Unit = {
+      val children_with_pv = node.get_children().filter(_.has_nonself_pv())
+      children_with_pv.foreach(recurse_score_node)
+
+      if (node.has_nonself_pv()) {
+        scores(node) = score_node(node)
+      }
+    }
+    private def score_node(node: SearchNode): Double = {
+      assert (node.has_nonself_pv())
+      math.log((children_counts(node.pv) + 1).toDouble / children_counts(node))
+    }
+  }
+  // a metric to define search goodness--it will help track improvements we make to the search algorithm
+  def compute_search_goodness(): SearchQuality = {
+    new SearchQuality()
   }
 
   // because with transpositions, it is not guaranteed that the pv's move ordering is the most likely one

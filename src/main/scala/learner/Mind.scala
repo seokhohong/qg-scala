@@ -53,6 +53,29 @@ class SearchTree(board: Bitboard,
     }
   }
 
+  // prefers pv's that have been explored more deeply
+  private def confidence_score(node: SearchNode): Double = {
+    val confidence_function = _search_params("confidence_function").asInstanceOf[Int => Double]
+    val sign = if(node.is_maximizing) 1 else -1
+    node.move_goodness() + confidence_function(node.pv_depth()) * sign
+  }
+
+
+  def compute_confidence_pv(): SearchNode = {
+    val move_seq = MoveSeq.empty()
+
+    var node = root_node
+    breakable {
+      while (node.has_nonself_pv()) {
+        val children_with_q = node.get_children().filter(_.assigned_q())
+        val best_child = if (node.is_maximizing) children_with_q.maxBy(confidence_score) else children_with_q.minBy(confidence_score)
+        move_seq.append(best_child.get_move_relationship(node))
+        node = best_child
+      }
+    }
+    node
+  }
+
   def add_expand_node(node: SearchNode): Unit ={
     expandable_nodes += node
     if (validation)
@@ -64,7 +87,7 @@ class SearchTree(board: Bitboard,
   def remove_expand_nodes(parents: Set[SearchNode]): Unit = {
     expandable_nodes --= parents
   }
-  // makes no call to models, just a
+  // makes no call to models, just an object creation
   def create_child(parent: SearchNode, move: Int): Unit = {
     val child_transposition_hash = parent.get_move_list().hash_with_append(move)
 
@@ -72,6 +95,8 @@ class SearchTree(board: Bitboard,
 
     if (lookup_child.isDefined) {
       lookup_child.foreach(_.add_parent(parent, move))
+      // if the child has q score, then update the parent to take it into consideration
+      lookup_child.filter(_.assigned_q()).foreach(_ => parent.update_pv())
     } else {
       val child = parent.create_child(move)
       transpositionTable.put(child.get_move_list(), child)
@@ -120,7 +145,6 @@ class SearchTree(board: Bitboard,
     // reset
     parent.get_move_list().moves.foreach(_ => board.unmove())
     assert (board.get_available_moves() == before_state)
-
     remove_expand_nodes(nonexpanding_children.toSet)
   }
 
@@ -129,8 +153,8 @@ class SearchTree(board: Bitboard,
 
     val p_features = NativeTensorWrapper.allocate_floats(parents.size * _size2 * FeatureBoard.CHANNELS)
 
-    val feat_start_time = Calendar.getInstance().getTimeInMillis
-    for (node <- parents) {
+    val parents_list = parents.toList
+    for (node <- parents_list) {
       node.get_move_list().moves.foreach(feature_board.make_move)
       feature_board.write_p_features_inplace(p_features)
       node.get_move_list().moves.foreach(_ => feature_board.unmove())
@@ -141,28 +165,43 @@ class SearchTree(board: Bitboard,
     val log_predictions = predictions.mapValues { x =>
       math.log(math.max(math.min(x, 1), -1))
     }
-    val start_time = Calendar.getInstance().getTimeInMillis
+
     for (i <- 0 until predictions.rows) {
-      create_children(parents.toList(i), log_predictions(i, ::))
+      create_children(parents_list(i), log_predictions(i, ::))
     }
+
     remove_expand_nodes(parents)
+  }
+
+  def update_top_all_p(new_nodes: Set[SearchNode]): Unit = {
+    val num_pv_expand = _search_params("num_pv_expand").asInstanceOf[Int]
+    _top_all_p ++= new_nodes
+    _top_all_p = _top_all_p.sortBy(_.log_total_p).reverse.distinct.slice(0, num_pv_expand)
+    if (validation) {
+      assert(_top_all_p.contains(root_node))
+    }
   }
 
   // Returns a list of top principal variations to expand
   def pv_expansion(to_p_expand: Set[SearchNode]): Set[SearchNode] = {
     if (to_p_expand.isEmpty) return Set[SearchNode]()
 
-    _top_all_p ++= to_p_expand.slice(0, _search_params("num_pv_expand").asInstanceOf[Int])
+    update_top_all_p(to_p_expand)
 
     val top_pvs = mutable.Set[SearchNode]()
     for (node <- _top_all_p) {
       val pv = node.pv()
-      // node has a pv, which is not already counted, and is not already going to be expanded
-      // and if the pv does not point at a game end state
-      if (node.has_nonself_pv() && !to_p_expand.contains(pv) && !pv.game_over()) {
-        top_pvs += node
+      // if the pv does not point at a game end state
+      // there will be some overlap with to_p_expand
+      if (!pv.game_over()) {
+        top_pvs += pv
       }
     }
+
+    if (validation) {
+      assert(top_pvs.contains(root_node.pv()))
+    }
+
     if (verbose) println(f"PV Expansion: ${top_pvs.size}%d")
     top_pvs.toSet
   }
@@ -174,7 +213,7 @@ class SearchTree(board: Bitboard,
   def p_expand(): Unit = {
     val highest = highest_p(k = _search_params("p_batch_size").asInstanceOf[Int])
     val top_pvs = pv_expansion(highest)
-    compute_p(highest)
+    compute_p(highest ++ top_pvs)
   }
 
   def compute_q(candidates: Set[SearchNode]): Unit = {
@@ -194,6 +233,7 @@ class SearchTree(board: Bitboard,
       node.get_move_list().moves.foreach(_ => board.unmove())
     }
 
+    println(f"Computing Q: ${pred_q_nodes.size}%d")
     if (pred_q_nodes.isEmpty) return
 
     // make the q predictions
@@ -224,30 +264,71 @@ class SearchTree(board: Bitboard,
     root_node.assign_leaf_q(prediction.toDenseVector.map(_.toDouble))
   }
 
+  // Looks at top pv_expansion nodes by P value, taking each of their principal variations
+  // With each pv, we find the highest likelihood child
+  private def pv_q_expansion(): Set[SearchNode] = {
+    val pv_q = mutable.Set[SearchNode]()
+    for (node <- _top_all_p) {
+      val pv = node.pv()
+      if (pv.has_children()) {
+        pv_q ++= pv.get_children().map(_.deepest_unexplored())
+      }
+    }
+    println(f"PV Q Expansion ${pv_q.size}%d")
+    pv_q.toSet
+  }
+
   private def q_eval(): Unit = {
     val top_p = highest_p((_search_params("p_batch_size").asInstanceOf[Int] * _search_params("fraction_q").asInstanceOf[Double]).toInt)
 
-    val top_pvs = pv_expansion(top_p)
+    val top_pvs = pv_q_expansion()
 
     val to_eval = top_pvs ++ top_p
-
-    println("To eval")
 
     if (to_eval.nonEmpty) {
       compute_q(to_eval)
     }
   }
 
+  def run_validations(): Unit = {
+    if (validation) {
+      validate_proper_pv()
+    }
+  }
+
+  def validate_proper_pv(): Unit = {
+    for (node <- _top_all_p) {
+      val best_move = node.best_move() getOrElse 0
+      assert (node.pv().get_move_list().moves.contains(best_move))
+      for (child <- node.pv().get_children()) {
+        // this means we're failing to update pv somewhere important
+        if (child.assigned_q()) {
+          print("Wow")
+        }
+        assert (!child.assigned_q())
+      }
+    }
+  }
+
   def run_iteration(): Unit = {
     if (expandable_nodes.isEmpty) return
 
+    val orig_pv = root_node.pv()
     p_expand()
+
+    // pv must have been expanded or changed
+    if (validation) assert (root_node.pv().has_children() || root_node.pv() != orig_pv)
 
     if (verbose) {
       println(f"Num Leaf Nodes ${expandable_nodes.size}%d, Transposition ${transpositionTable.hits}%d")
     }
 
     q_eval()
+
+    // pv must change
+    if (validation) assert (root_node.pv() != orig_pv)
+
+    run_validations()
 
     if (!root_node.has_self_q()) {
       make_root_q()

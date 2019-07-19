@@ -56,4 +56,19 @@ class SearchNodeTest extends FunSuite {
     assert (base.pv() == short_win)
     assert (base.pv().get_move_list().moves == base.pv().calculate_pv_order())
   }
+  test(testName = "quality check") {
+    val node_params: Map[String, Any] = Map[String, Any]("q_draw_vector" -> DenseVector[Double](1, 0, -1))
+    val base: SearchNode = SearchNode.make_root(is_maximizing = true, node_params)
+
+    base.create_child(16)
+    base.get_child(16).assign_leaf_q(DenseVector[Double](0.5, 0.3, 0.2))
+    base.create_child(32)
+    base.get_child(32).assign_leaf_q(DenseVector[Double](0.4, 0.3, 0.3))
+    base.update_pv()
+
+    val search_quality = base.compute_search_goodness()
+    println(search_quality.scores)
+    println(search_quality.composite_score)
+    assert(search_quality.children_counts(base) == 2)
+  }
 }
